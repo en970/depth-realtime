@@ -1,15 +1,29 @@
 {
   "name": "depth-realtime",
+  "version": "0.1.0",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
+  "description": "Real-time monocular depth estimation from a live camera stream, running entirely in the browser.",
+  "license": "MIT",
+  "author": "Enes \u00d6z",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/en970/depth-realtime.git"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node tests/smoke.mjs"
   },
   "devDependencies": {
+    "@webgpu/types": "^0.1.71",
+    "playwright": "^1.62.1",
     "typescript": "~6.0.2",
     "vite": "^8.2.0"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0"
   }
 }

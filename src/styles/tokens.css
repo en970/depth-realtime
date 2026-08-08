@@ -1,0 +1,111 @@
+/*
+ * Design tokens.
+ *
+ * The interface palette is deliberately achromatic and cold. The depth map is
+ * the only chromatic element on the page: if the chrome carried a blue accent
+ * it would compete with the colour scale and make relative depth harder to read.
+ * Emphasis is therefore carried by luminance, hairline borders and translucent
+ * white material layers rather than by hue.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces. Elevation is expressed by lightness, not by shadow. */
+  --bg-void: #06080c;
+  --bg-base: #0a0d13;
+  --bg-panel: #10141d;
+  --bg-panel-raised: #161b26;
+  --bg-inset: #070910;
+
+  /* Translucent material. A single white alpha token adapts to any surface
+     underneath it, which is why borders are never opaque colours. */
+  --glass: rgba(255, 255, 255, 0.045);
+  --glass-strong: rgba(255, 255, 255, 0.08);
+  --scrim: rgba(4, 6, 11, 0.62);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0) 42%);
+  --grid-line: rgba(255, 255, 255, 0.028);
+  --grain-opacity: 0.03;
+
+  /* Text. Never pure white: it blooms against very dark surfaces. */
+  --fg: #eef1f6;
+  --fg-secondary: #9ba6b6;
+  --fg-muted: #7c8798;
+  --fg-disabled: #4e586a;
+
+  --border: rgba(255, 255, 255, 0.085);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --border-control: rgba(255, 255, 255, 0.13);
+
+  /* Primary action inverts in dark mode: near-white fill, dark label. */
+  --accent: #e9edf4;
+  --accent-hover: #ffffff;
+  --accent-fg: #0c1017;
+  --ring: rgba(255, 255, 255, 0.55);
+
+  --status-live: #35d39a;
+  --status-warn: #f0b429;
+  --status-error: #f6796f;
+  --status-idle: #5f6a7c;
+
+  /* Depth colour scale — cmocean "ice" (MIT), reproduced from 17 evenly spaced
+     stops. Monotonically increasing lightness (L* 1.8 to 98.0), which keeps the
+     ordering readable in greyscale and under colour vision deficiency.
+     t = 0 is far, t = 1 is near. The model emits inverse depth, so no flip. */
+  --cmap-ice: linear-gradient(90deg,
+    #040613 0%, #13132a 6.25%, #212041 12.5%, #2e2c5a 18.75%,
+    #383975 25%, #3e478f 31.25%, #3f57a3 37.5%, #3e69b0 43.75%,
+    #427bb7 50%, #4b8bbd 56.25%, #579cc3 62.5%, #67adc9 68.75%,
+    #79bed0 75%, #92ced7 81.25%, #afdde1 87.5%, #cdecef 93.75%,
+    #eafdfd 100%);
+
+  --radius-panel: 14px;
+  --radius-control: 10px;
+  --radius-sm: 7px;
+  --radius-pill: 999px;
+
+  --shadow-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.055);
+  --shadow-panel: 0 18px 40px -14px rgba(0, 0, 0, 0.8), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-control: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --blur-glass: 20px;
+  --saturate-glass: 140%;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
+    system-ui, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Roboto Mono",
+    Menlo, Consolas, monospace;
+
+  --fs-micro: 11px;
+  --fs-label: 12px;
+  --fs-body: 13px;
+  --fs-value: 15px;
+  --fs-title: 15px;
+  --lh-body: 1.5;
+  --lh-dense: 1.25;
+  --tracking-label: 0.085em;
+
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+
+  --panel-w: 316px;
+  --rail-h: 48px;
+  --control-h: 32px;
+  --touch-min: 44px;
+}
+
+@media (max-width: 900px) {
+  :root {
+    --fs-body: 14px;
+    --control-h: 38px;
+  }
+}

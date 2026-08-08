@@ -1,60 +1,738 @@
-import './style.css'
-import typescriptLogo from './assets/typescript.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import { setupCounter } from './counter.ts'
+import "./styles/tokens.css";
+import "./styles/base.css";
+import "./styles/layout.css";
+import "./styles/components.css";
 
-document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
-<section id="center">
-  <div class="hero">
-    <img src="${heroImg}" class="base" width="170" height="179">
-    <img src="${typescriptLogo}" class="framework" alt="TypeScript logo"/>
-    <img src="${viteLogo}" class="vite" alt="Vite logo" />
-  </div>
-  <div>
-    <h1>Get started</h1>
-    <p>Edit <code>src/main.ts</code> and save to test <code>HMR</code></p>
-  </div>
-  <button id="counter" type="button" class="counter"></button>
-</section>
+import { Camera } from "./lib/camera";
+import { buildLut, COLORMAPS, cssGradient, type ColormapId } from "./lib/colormaps";
+import { DepthRenderer } from "./lib/depth-renderer";
+import { snapToPatch, type FromWorker, type ToWorker } from "./lib/protocol";
 
-<div class="ticks"></div>
+/* -------------------------------------------------------------------------- */
+/* Elements                                                                    */
+/* -------------------------------------------------------------------------- */
 
-<section id="next-steps">
-  <div id="docs">
-    <svg class="icon" role="presentation" aria-hidden="true"><use href="/icons.svg#documentation-icon"></use></svg>
-    <h2>Documentation</h2>
-    <p>Your questions, answered</p>
-    <ul>
-      <li>
-        <a href="https://vite.dev/" target="_blank">
-          <img class="logo" src="${viteLogo}" alt="" />
-          Explore Vite
-        </a>
-      </li>
-      <li>
-        <a href="https://www.typescriptlang.org" target="_blank">
-          <img class="button-icon" src="${typescriptLogo}" alt="">
-          Learn more
-        </a>
-      </li>
-    </ul>
-  </div>
-  <div id="social">
-    <svg class="icon" role="presentation" aria-hidden="true"><use href="/icons.svg#social-icon"></use></svg>
-    <h2>Connect with us</h2>
-    <p>Join the Vite community</p>
-    <ul>
-      <li><a href="https://github.com/vitejs/vite" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#github-icon"></use></svg>GitHub</a></li>
-      <li><a href="https://chat.vite.dev/" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#discord-icon"></use></svg>Discord</a></li>
-      <li><a href="https://x.com/vite_js" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#x-icon"></use></svg>X.com</a></li>
-      <li><a href="https://bsky.app/profile/vite.dev" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#bluesky-icon"></use></svg>Bluesky</a></li>
-    </ul>
-  </div>
-</section>
+const $ = <T extends HTMLElement>(id: string): T => {
+  const element = document.getElementById(id);
+  if (!element) throw new Error(`Missing element #${id}`);
+  return element as T;
+};
 
-<div class="ticks"></div>
-<section id="spacer"></section>
-`
+const video = $<HTMLVideoElement>("camera");
+const depthCanvas = $<HTMLCanvasElement>("depth");
+const viewer = $<HTMLElement>("viewer");
 
-setupCounter(document.querySelector<HTMLButtonElement>('#counter')!)
+const overlay = $<HTMLElement>("overlay");
+const overlayKicker = $<HTMLElement>("overlay-kicker");
+const overlayTitle = $<HTMLElement>("overlay-title");
+const overlayText = $<HTMLElement>("overlay-text");
+const overlayAction = $<HTMLButtonElement>("overlay-action");
+const overlayProgress = $<HTMLElement>("overlay-progress");
+const overlayProgressBar = $<HTMLElement>("overlay-progress-bar");
+
+const statusBadge = $<HTMLElement>("badge-status");
+const statusText = $<HTMLElement>("badge-status-text");
+const statFps = $<HTMLElement>("stat-fps");
+const statLatency = $<HTMLElement>("stat-latency");
+const liveSummary = $<HTMLElement>("live-summary");
+
+const metaCamera = $<HTMLElement>("meta-camera");
+const metaDepth = $<HTMLElement>("meta-depth");
+const legendScale = $<HTMLElement>("legend-scale");
+
+const toggleStream = $<HTMLButtonElement>("toggle-stream");
+const cameraSelect = $<HTMLSelectElement>("camera-select");
+const mirrorToggle = $<HTMLInputElement>("mirror-toggle");
+const colormapSelect = $<HTMLSelectElement>("colormap-select");
+const resolutionRange = $<HTMLInputElement>("resolution-range");
+const resolutionValue = $<HTMLElement>("resolution-value");
+const smoothingRange = $<HTMLInputElement>("smoothing-range");
+const smoothingValue = $<HTMLElement>("smoothing-value");
+const adaptiveToggle = $<HTMLInputElement>("adaptive-toggle");
+const compareInput = $<HTMLInputElement>("compare-input");
+const infoBackend = $<HTMLElement>("info-backend");
+const infoDtype = $<HTMLElement>("info-dtype");
+const infoOutput = $<HTMLElement>("info-output");
+
+/* -------------------------------------------------------------------------- */
+/* State                                                                       */
+/* -------------------------------------------------------------------------- */
+
+type Mode = "split" | "compare";
+
+interface Settings {
+  mode: Mode;
+  colormap: ColormapId;
+  resolution: number;
+  smoothing: number;
+  mirror: boolean;
+  adaptive: boolean;
+  split: number;
+}
+
+const isMobile =
+  matchMedia("(pointer: coarse)").matches && matchMedia("(max-width: 1024px)").matches;
+
+const defaults: Settings = {
+  mode: "split",
+  colormap: "ice",
+  resolution: isMobile ? 266 : 392,
+  smoothing: 0.35,
+  mirror: true,
+  adaptive: true,
+  split: 50,
+};
+
+const settings: Settings = { ...defaults, ...readSettings() };
+
+function readSettings(): Partial<Settings> {
+  const out: Partial<Settings> = {};
+  const source = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const stored = (() => {
+    try {
+      return JSON.parse(localStorage.getItem("depth-realtime:settings") ?? "{}");
+    } catch {
+      return {};
+    }
+  })();
+
+  const pick = (key: string): string | null => source.get(key) ?? (stored[key] ?? null);
+
+  /** Number(null) is 0, which silently overrides defaults with a valid-looking
+   *  zero. Absent keys must stay absent. */
+  const pickNumber = (key: string, min: number, max: number): number | null => {
+    const raw = pick(key);
+    if (raw === null || raw === "") return null;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= min && value <= max ? value : null;
+  };
+
+  const mode = pick("mode");
+  if (mode === "split" || mode === "compare") out.mode = mode;
+
+  const colormap = pick("cmap");
+  if (colormap && colormap in COLORMAPS) out.colormap = colormap as ColormapId;
+
+  const resolution = pickNumber("res", 182, 518);
+  if (resolution !== null) out.resolution = snapToPatch(resolution);
+
+  const smoothing = pickNumber("smooth", 0, 0.85);
+  if (smoothing !== null) out.smoothing = smoothing;
+
+  const split = pickNumber("split", 0, 100);
+  if (split !== null) out.split = split;
+
+  const mirror = pick("mirror");
+  if (mirror !== null) out.mirror = mirror === "1" || mirror === "true";
+
+  const adaptive = pick("adaptive");
+  if (adaptive !== null) out.adaptive = adaptive === "1" || adaptive === "true";
+
+  return out;
+}
+
+let persistTimer = 0;
+function persistSettings(): void {
+  clearTimeout(persistTimer);
+  persistTimer = window.setTimeout(() => {
+    const params = new URLSearchParams({
+      mode: settings.mode,
+      cmap: settings.colormap,
+      res: String(settings.resolution),
+      smooth: settings.smoothing.toFixed(2),
+      split: settings.split.toFixed(0),
+      mirror: settings.mirror ? "1" : "0",
+      adaptive: settings.adaptive ? "1" : "0",
+    });
+    history.replaceState(null, "", `#${params.toString()}`);
+    try {
+      localStorage.setItem(
+        "depth-realtime:settings",
+        JSON.stringify(Object.fromEntries(params)),
+      );
+    } catch {
+      /* private browsing */
+    }
+  }, 250);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Rendering + inference plumbing                                              */
+/* -------------------------------------------------------------------------- */
+
+const renderer = new DepthRenderer(depthCanvas);
+renderer.setColormap(buildLut(settings.colormap));
+
+const worker = new Worker(new URL("./lib/depth-worker.ts", import.meta.url), {
+  type: "module",
+});
+
+const capture = document.createElement("canvas");
+const captureCtx = capture.getContext("2d", { willReadFrequently: true })!;
+
+const camera = new Camera(video, {
+  onInterrupted: () => setStatus("warn", "Interrupted"),
+  onResumed: () => setStatus("live", "Live"),
+  onEnded: () => {
+    running = false;
+    setStatus("error", "Disconnected");
+    showOverlay({
+      kicker: "Camera",
+      title: "The camera stream ended",
+      text: "The device was disconnected or claimed by another application.",
+      action: "Reconnect",
+      tone: "error",
+    });
+  },
+});
+
+let modelReady = false;
+let running = false;
+let paused = false;
+let frameId = 0;
+let inFlight = false;
+let lastResultAt = 0;
+let interval = 100;
+let latencyEma = 0;
+let fpsEma = 0;
+let lastAdaptation = 0;
+
+const LADDER = [182, 196, 224, 252, 280, 322, 350, 392, 434, 476, 518];
+
+/* -------------------------------------------------------------------------- */
+/* Worker messages                                                             */
+/* -------------------------------------------------------------------------- */
+
+const send = (message: ToWorker, transfer?: Transferable[]) =>
+  worker.postMessage(message, transfer ?? []);
+
+// Without these the worker can die silently and the page just stops updating.
+worker.onerror = (event) => {
+  inFlight = false;
+  running = false;
+  setStatus("error", "Failed");
+  showOverlay({
+    kicker: "Inference",
+    title: "The inference worker stopped",
+    text: event.message || "The worker terminated unexpectedly.",
+    action: "Reload",
+    tone: "error",
+    onAction: () => location.reload(),
+  });
+};
+
+worker.onmessageerror = () => {
+  inFlight = false;
+};
+
+/** Diagnostic hook. Call `depthDiagnostics()` from the browser console to see
+ *  why the pipeline is idle. Documented in the README. */
+(globalThis as unknown as { depthDiagnostics: () => unknown }).depthDiagnostics = () => ({
+  running,
+  paused,
+  inFlight,
+  modelReady,
+  frameId,
+  latencyEma,
+  fpsEma,
+  videoReady: video.readyState,
+  videoSize: [video.videoWidth, video.videoHeight],
+});
+
+worker.onmessage = (event: MessageEvent<FromWorker>) => {
+  const message = event.data;
+
+  switch (message.type) {
+    case "status": {
+      if (message.stage === "downloading") {
+        overlayProgress.hidden = false;
+        overlayProgressBar.style.width = `${((message.progress ?? 0) * 100).toFixed(1)}%`;
+        showOverlay({
+          kicker: "Model",
+          title: "Downloading network weights",
+          text:
+            message.detail !== undefined
+              ? `${message.detail} — cached locally, so later visits start immediately.`
+              : "Cached locally, so later visits start immediately.",
+          action: null,
+        });
+      } else if (message.stage === "compiling") {
+        showOverlay({
+          kicker: "Model",
+          title: "Preparing the inference session",
+          text: "Compiling shaders for this device.",
+          action: null,
+        });
+      }
+      break;
+    }
+
+    case "ready": {
+      modelReady = true;
+      overlayProgress.hidden = true;
+      infoBackend.textContent = message.backend === "webgpu" ? "WebGPU" : "WASM (1 thread)";
+      infoDtype.textContent = message.dtype;
+      if (message.backend === "wasm") {
+        setStatus("warn", "Compatibility");
+      }
+      if (camera.active) {
+        hideOverlay();
+        startLoop();
+      }
+      break;
+    }
+
+    case "result": {
+      inFlight = false;
+      const now = performance.now();
+      if (lastResultAt > 0) {
+        const delta = now - lastResultAt;
+        interval = delta;
+        fpsEma = fpsEma === 0 ? 1000 / delta : fpsEma * 0.8 + (1000 / delta) * 0.2;
+      }
+      lastResultAt = now;
+      latencyEma = latencyEma === 0 ? message.ms : latencyEma * 0.8 + message.ms * 0.2;
+
+      renderer.push(
+        new Float32Array(message.buffer),
+        message.width,
+        message.height,
+        0,
+        1,
+        interval,
+      );
+      metaDepth.textContent = `${message.width}x${message.height}`;
+      infoOutput.textContent = `${message.width}x${message.height}`;
+      adapt(now);
+      break;
+    }
+
+    case "error": {
+      inFlight = false;
+      if (message.fatal) {
+        running = false;
+        setStatus("error", "Failed");
+        console.error(`[depth] ${message.message}`);
+        showOverlay({
+          kicker: "Inference",
+          title: "The model could not run on this device",
+          text: message.message,
+          action: "Try again",
+          tone: "error",
+        });
+      } else {
+        setStatus("warn", "Recovering");
+        console.warn(`[depth] ${message.message}`);
+      }
+      break;
+    }
+  }
+};
+
+/* -------------------------------------------------------------------------- */
+/* Frame loop                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Two independent clocks. Capture is driven by requestVideoFrameCallback so it
+ * fires once per camera frame rather than once per display refresh — on a 30 fps
+ * camera and a 60 Hz screen that halves the work. Presentation runs on
+ * requestAnimationFrame and interpolates between the last two depth fields, so
+ * the depth pane stays smooth even when inference is much slower than capture.
+ */
+function startLoop(): void {
+  if (running) return;
+  running = true;
+  setStatus("live", "Live");
+  scheduleCapture();
+  requestAnimationFrame(present);
+}
+
+function scheduleCapture(): void {
+  if (!running) return;
+  const useVideoCallback = typeof video.requestVideoFrameCallback === "function";
+  if (useVideoCallback) {
+    video.requestVideoFrameCallback(() => {
+      captureFrame();
+      scheduleCapture();
+    });
+  } else {
+    requestAnimationFrame(() => {
+      captureFrame();
+      scheduleCapture();
+    });
+  }
+}
+
+function captureFrame(): void {
+  if (!running || paused || inFlight || !modelReady) return;
+  if (video.readyState < 2 || !video.videoWidth) return;
+
+  const scale = settings.resolution / Math.max(video.videoWidth, video.videoHeight);
+  const width = Math.max(14, Math.round(video.videoWidth * scale));
+  const height = Math.max(14, Math.round(video.videoHeight * scale));
+
+  if (capture.width !== width || capture.height !== height) {
+    capture.width = width;
+    capture.height = height;
+  }
+  captureCtx.drawImage(video, 0, 0, width, height);
+  const image = captureCtx.getImageData(0, 0, width, height);
+
+  inFlight = true;
+  frameId++;
+  send(
+    { type: "frame", id: frameId, buffer: image.data.buffer, width, height },
+    [image.data.buffer],
+  );
+}
+
+function present(now: number): void {
+  if (!running) return;
+  renderer.render(now);
+  requestAnimationFrame(present);
+}
+
+/**
+ * Adaptive quality. Sustained GPU load throttles phones hard — published
+ * measurements show ~40% throughput loss within a minute — so a fixed
+ * resolution either wastes headroom on desktops or collapses on mobile. The
+ * hysteresis (drop after 2.5 s, raise after 6 s) keeps it from oscillating.
+ */
+function adapt(now: number): void {
+  if (!settings.adaptive) return;
+  const budget = isMobile ? 95 : 55;
+
+  if (latencyEma > budget * 1.3 && now - lastAdaptation > 2500) {
+    const index = LADDER.indexOf(settings.resolution);
+    if (index > 0) {
+      lastAdaptation = now;
+      applyResolution(LADDER[index - 1], false);
+    }
+  } else if (latencyEma < budget * 0.55 && now - lastAdaptation > 6000) {
+    const index = LADDER.indexOf(settings.resolution);
+    if (index >= 0 && index < LADDER.length - 1) {
+      lastAdaptation = now;
+      applyResolution(LADDER[index + 1], false);
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Overlay + status                                                            */
+/* -------------------------------------------------------------------------- */
+
+let overlayAction_: (() => void) | null = null;
+
+function showOverlay(options: {
+  kicker: string;
+  title: string;
+  text: string;
+  action: string | null;
+  tone?: "neutral" | "error";
+  onAction?: () => void;
+}): void {
+  overlay.hidden = false;
+  overlay.dataset.tone = options.tone ?? "neutral";
+  overlayKicker.textContent = options.kicker;
+  overlayTitle.textContent = options.title;
+  overlayText.textContent = options.text;
+  overlayAction.hidden = options.action === null;
+  if (options.action) overlayAction.textContent = options.action;
+  overlayAction_ = options.onAction ?? overlayAction_;
+}
+
+function hideOverlay(): void {
+  overlay.hidden = true;
+  overlayProgress.hidden = true;
+}
+
+function setStatus(state: "idle" | "live" | "warn" | "error", label: string): void {
+  statusBadge.dataset.state = state;
+  statusText.textContent = label;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Controls                                                                    */
+/* -------------------------------------------------------------------------- */
+
+function applyMode(mode: Mode): void {
+  settings.mode = mode;
+  viewer.dataset.mode = mode;
+  document.querySelectorAll<HTMLButtonElement>(".segmented__item[data-mode]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.mode === mode));
+  });
+  persistSettings();
+}
+
+function applyColormap(id: ColormapId): void {
+  settings.colormap = id;
+  renderer.setColormap(buildLut(id));
+  legendScale.style.backgroundImage = cssGradient(id);
+  colormapSelect.value = id;
+  persistSettings();
+}
+
+function applyResolution(value: number, fromUser: boolean): void {
+  const snapped = snapToPatch(value);
+  settings.resolution = snapped;
+  resolutionRange.value = String(snapped);
+  resolutionValue.textContent = `${snapped} px`;
+  setRangeFill(resolutionRange);
+  send({ type: "config", resolution: snapped });
+  if (fromUser) {
+    lastAdaptation = performance.now();
+    persistSettings();
+  }
+}
+
+function applySmoothing(value: number): void {
+  settings.smoothing = value;
+  smoothingRange.value = String(value);
+  smoothingValue.textContent = value.toFixed(2);
+  setRangeFill(smoothingRange);
+  send({ type: "config", smoothing: value });
+  persistSettings();
+}
+
+function applyMirror(mirror: boolean): void {
+  settings.mirror = mirror;
+  mirrorToggle.checked = mirror;
+  video.classList.toggle("pane__media--mirrored", mirror);
+  depthCanvas.classList.toggle("pane__media--mirrored", mirror);
+  persistSettings();
+}
+
+function applySplit(value: number): void {
+  settings.split = value;
+  viewer.style.setProperty("--split", `${value}%`);
+  compareInput.value = String(value);
+  compareInput.setAttribute("aria-valuetext", `${Math.round(value)}% depth`);
+  persistSettings();
+}
+
+/** Fills the track to the left of the thumb; WebKit has no ::-moz-range-progress. */
+function setRangeFill(input: HTMLInputElement): void {
+  const min = Number(input.min);
+  const max = Number(input.max);
+  const ratio = ((Number(input.value) - min) / (max - min)) * 100;
+  input.style.setProperty("--fill", `${ratio}%`);
+}
+
+async function refreshDevices(): Promise<void> {
+  const devices = await camera.devices();
+  cameraSelect.innerHTML = "";
+  if (devices.length === 0) {
+    cameraSelect.disabled = true;
+    cameraSelect.append(new Option("No camera found", ""));
+    return;
+  }
+  for (const device of devices) {
+    const option = new Option(device.label, device.id);
+    option.selected = device.id === camera.currentDeviceId;
+    cameraSelect.append(option);
+  }
+  cameraSelect.disabled = devices.length < 2;
+}
+
+async function startCamera(deviceId?: string): Promise<void> {
+  overlayAction.disabled = true;
+  const previousLabel = overlayAction.textContent;
+  overlayAction.textContent = "Waiting for permission";
+
+  const failure = await camera.start(deviceId);
+
+  overlayAction.disabled = false;
+  overlayAction.textContent = previousLabel;
+
+  if (failure) {
+    setStatus("error", "Blocked");
+    showOverlay({
+      kicker: "Camera",
+      title: failure.title,
+      text: failure.detail,
+      action: "Try again",
+      tone: "error",
+      onAction: () => startCamera(deviceId),
+    });
+    return;
+  }
+
+  await refreshDevices();
+  const resolution = camera.resolution;
+  if (resolution) metaCamera.textContent = `${resolution.width}x${resolution.height}`;
+  toggleStream.textContent = "Stop";
+
+  if (!modelReady) {
+    showOverlay({
+      kicker: "Model",
+      title: "Loading the depth network",
+      text: "Weights are fetched once and cached in the browser.",
+      action: null,
+    });
+    return;
+  }
+  hideOverlay();
+  startLoop();
+}
+
+function stopCamera(): void {
+  running = false;
+  camera.stop();
+  toggleStream.textContent = "Start";
+  setStatus("idle", "Idle");
+  showOverlay({
+    kicker: "Camera",
+    title: "Camera stopped",
+    text: "The stream is released. Nothing was recorded or transmitted.",
+    action: "Start camera",
+    onAction: () => startCamera(cameraSelect.value || undefined),
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Wiring                                                                      */
+/* -------------------------------------------------------------------------- */
+
+overlayAction.addEventListener("click", () => {
+  if (overlayAction_) {
+    overlayAction_();
+    return;
+  }
+  void begin();
+});
+
+async function begin(): Promise<void> {
+  // Weight download and permission prompt run concurrently: both are slow and
+  // neither depends on the other.
+  if (!modelReady) {
+    const forced = new URLSearchParams(location.hash.replace(/^#/, "")).get("backend");
+    send({
+      type: "init",
+      resolution: settings.resolution,
+      smoothing: settings.smoothing,
+      mobile: isMobile,
+      force: forced === "wasm" || forced === "webgpu" ? forced : undefined,
+    });
+  }
+  await startCamera(cameraSelect.value || undefined);
+}
+
+toggleStream.addEventListener("click", () => {
+  if (camera.active) stopCamera();
+  else void begin();
+});
+
+cameraSelect.addEventListener("change", () => {
+  if (camera.active) void startCamera(cameraSelect.value);
+});
+
+mirrorToggle.addEventListener("change", () => applyMirror(mirrorToggle.checked));
+
+colormapSelect.addEventListener("change", () =>
+  applyColormap(colormapSelect.value as ColormapId),
+);
+
+document.querySelectorAll<HTMLButtonElement>(".segmented__item[data-mode]").forEach((button) => {
+  button.addEventListener("click", () => applyMode(button.dataset.mode as Mode));
+});
+
+resolutionRange.addEventListener("input", () => {
+  applyResolution(Number(resolutionRange.value), true);
+});
+
+smoothingRange.addEventListener("input", () => {
+  applySmoothing(Number(smoothingRange.value));
+});
+
+adaptiveToggle.addEventListener("change", () => {
+  settings.adaptive = adaptiveToggle.checked;
+  persistSettings();
+});
+
+compareInput.addEventListener("input", () => applySplit(Number(compareInput.value)));
+
+document.addEventListener("keydown", (event) => {
+  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
+    return;
+  }
+  switch (event.key) {
+    case " ":
+      event.preventDefault();
+      paused = !paused;
+      setStatus(paused ? "warn" : "live", paused ? "Paused" : "Live");
+      break;
+    case "c":
+    case "C":
+      applyMode(settings.mode === "split" ? "compare" : "split");
+      break;
+    case "m":
+    case "M": {
+      const ids = Object.keys(COLORMAPS) as ColormapId[];
+      applyColormap(ids[(ids.indexOf(settings.colormap) + 1) % ids.length]);
+      break;
+    }
+    case "ArrowLeft":
+      if (settings.mode === "compare") applySplit(Math.max(0, settings.split - 2));
+      break;
+    case "ArrowRight":
+      if (settings.mode === "compare") applySplit(Math.min(100, settings.split + 2));
+      break;
+  }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    paused = true;
+  } else {
+    paused = false;
+    void camera.resume();
+  }
+});
+
+window.addEventListener("pagehide", () => camera.stop());
+
+/* Telemetry, updated on a slow clock so screen readers are not flooded. */
+setInterval(() => {
+  statFps.textContent = fpsEma > 0 ? fpsEma.toFixed(1) : "—";
+  statLatency.textContent = latencyEma > 0 ? latencyEma.toFixed(0) : "—";
+}, 500);
+
+setInterval(() => {
+  if (!running) return;
+  liveSummary.textContent = `${fpsEma.toFixed(0)} frames per second, ${latencyEma.toFixed(0)} milliseconds per inference, input ${settings.resolution} pixels.`;
+}, 5000);
+
+/* -------------------------------------------------------------------------- */
+/* Boot                                                                        */
+/* -------------------------------------------------------------------------- */
+
+applyMode(settings.mode);
+applyColormap(settings.colormap);
+applyMirror(settings.mirror);
+applySplit(settings.split);
+adaptiveToggle.checked = settings.adaptive;
+resolutionRange.value = String(settings.resolution);
+resolutionValue.textContent = `${settings.resolution} px`;
+smoothingRange.value = String(settings.smoothing);
+smoothingValue.textContent = settings.smoothing.toFixed(2);
+setRangeFill(resolutionRange);
+setRangeFill(smoothingRange);
+
+if (Camera.insecureContext()) {
+  showOverlay({
+    kicker: "Camera",
+    title: "A secure context is required",
+    text: "Camera access needs HTTPS or localhost.",
+    action: null,
+    tone: "error",
+  });
+} else if (!Camera.supported()) {
+  showOverlay({
+    kicker: "Camera",
+    title: "This browser cannot open a camera",
+    text: "Open the page in Safari, Chrome or Edge rather than an in-app browser.",
+    action: null,
+    tone: "error",
+  });
+}

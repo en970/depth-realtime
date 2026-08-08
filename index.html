@@ -2,12 +2,224 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>depth-realtime</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <title>Real-Time Monocular Depth Estimation</title>
+    <meta
+      name="description"
+      content="Real-time monocular depth estimation from a live camera stream, running entirely in the browser with WebGPU. No video leaves the device."
+    />
+    <script type="module" src="/src/main.ts"></script>
   </head>
   <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <div class="app">
+      <header class="rail">
+        <h1 class="rail__title">Depth&nbsp;/&nbsp;Realtime</h1>
+        <span class="rail__sub">Monocular depth estimation in the browser</span>
+        <div class="rail__spacer"></div>
+        <div class="rail__stats">
+          <span class="stat" title="Inference throughput">
+            <span class="stat__value mono" id="stat-fps" aria-hidden="true">—</span>
+            <span class="stat__unit">fps</span>
+          </span>
+          <span class="stat" title="Time per inference">
+            <span class="stat__value mono" id="stat-latency" aria-hidden="true">—</span>
+            <span class="stat__unit">ms</span>
+          </span>
+          <span class="badge" id="badge-status" data-state="idle">
+            <span class="badge__dot"></span>
+            <span id="badge-status-text">Idle</span>
+          </span>
+        </div>
+        <p class="visually-hidden" id="live-summary" aria-live="polite"></p>
+      </header>
+
+      <main class="stage">
+        <section class="viewer" id="viewer" data-mode="split" style="--split: 50%">
+          <figure class="pane pane--camera">
+            <video
+              class="pane__media"
+              id="camera"
+              autoplay
+              muted
+              playsinline
+              disablepictureinpicture
+            ></video>
+            <figcaption class="pane__label">Camera / raw</figcaption>
+            <span class="pane__meta mono" id="meta-camera">—</span>
+          </figure>
+
+          <figure class="pane pane--depth">
+            <canvas class="pane__media" id="depth"></canvas>
+            <figcaption class="pane__label">Depth / relative</figcaption>
+            <span class="pane__meta mono" id="meta-depth">—</span>
+            <div class="legend">
+              <span class="legend__end">Far</span>
+              <span class="legend__scale" id="legend-scale"></span>
+              <span class="legend__end">Near</span>
+            </div>
+          </figure>
+
+          <div class="compare">
+            <input
+              class="compare__input"
+              id="compare-input"
+              type="range"
+              min="0"
+              max="100"
+              step="0.5"
+              value="50"
+              aria-label="Comparison position"
+            />
+            <div class="compare__line"></div>
+            <div class="compare__grip" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6.5 4 3 8l3.5 4M9.5 4 13 8l-3.5 4" />
+              </svg>
+            </div>
+          </div>
+
+          <div class="overlay" id="overlay" data-tone="neutral">
+            <div class="overlay__inner">
+              <p class="micro" id="overlay-kicker">Camera access</p>
+              <h2 class="overlay__title" id="overlay-title">Enable the camera to begin</h2>
+              <p class="overlay__text" id="overlay-text">
+                Frames are captured, analysed and rendered locally. No image data
+                is uploaded, and the site has no server component.
+              </p>
+              <div class="progress" id="overlay-progress" hidden>
+                <div class="progress__bar" id="overlay-progress-bar"></div>
+              </div>
+              <button class="btn btn--primary" id="overlay-action" type="button">
+                Enable camera
+              </button>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <aside class="controls">
+        <section class="group">
+          <h2 class="group__title">Capture</h2>
+          <div class="field">
+            <button class="btn btn--block" id="toggle-stream" type="button">Start</button>
+          </div>
+          <div class="field">
+            <label class="field__label" for="camera-select">Camera</label>
+            <select class="select" id="camera-select" disabled>
+              <option value="">Not available</option>
+            </select>
+          </div>
+          <label class="switch">
+            Mirror camera
+            <input type="checkbox" id="mirror-toggle" checked />
+            <span class="switch__track"></span>
+          </label>
+        </section>
+
+        <section class="group">
+          <h2 class="group__title">View</h2>
+          <div class="field">
+            <span class="field__label" id="mode-label">Layout</span>
+            <div class="segmented" role="group" aria-labelledby="mode-label">
+              <button class="segmented__item" type="button" data-mode="split" aria-pressed="true">
+                Side by side
+              </button>
+              <button class="segmented__item" type="button" data-mode="compare" aria-pressed="false">
+                Comparison
+              </button>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field__label" for="colormap-select">Colour scale</label>
+            <select class="select" id="colormap-select">
+              <option value="ice" selected>Ice (far blue to near white)</option>
+              <option value="gray">Greyscale</option>
+              <option value="magma">Magma</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="group">
+          <h2 class="group__title">Model</h2>
+          <div class="field">
+            <label class="field__label" for="resolution-range">
+              Input resolution
+              <span class="field__value" id="resolution-value">392 px</span>
+            </label>
+            <input
+              class="range"
+              id="resolution-range"
+              type="range"
+              min="182"
+              max="518"
+              step="14"
+              value="392"
+            />
+            <p class="field__hint">
+              Square input to the network, constrained to multiples of 14. Higher
+              values sharpen object boundaries and cost throughput.
+            </p>
+          </div>
+          <div class="field">
+            <label class="field__label" for="smoothing-range">
+              Temporal smoothing
+              <span class="field__value" id="smoothing-value">0.35</span>
+            </label>
+            <input
+              class="range"
+              id="smoothing-range"
+              type="range"
+              min="0"
+              max="0.85"
+              step="0.05"
+              value="0.35"
+            />
+            <p class="field__hint">
+              Blends each depth frame with the previous one. Suppresses flicker;
+              high values leave a motion trail.
+            </p>
+          </div>
+          <label class="switch">
+            Adaptive quality
+            <input type="checkbox" id="adaptive-toggle" checked />
+            <span class="switch__track"></span>
+          </label>
+          <p class="field__hint">
+            Lowers the input resolution when the measured frame time exceeds the
+            budget, and raises it again once thermal headroom returns.
+          </p>
+        </section>
+
+        <section class="group">
+          <h2 class="group__title">Runtime</h2>
+          <dl class="field">
+            <div class="field__label">
+              <dt>Backend</dt>
+              <dd class="field__value" id="info-backend">—</dd>
+            </div>
+            <div class="field__label">
+              <dt>Weights</dt>
+              <dd class="field__value" id="info-dtype">—</dd>
+            </div>
+            <div class="field__label">
+              <dt>Output</dt>
+              <dd class="field__value" id="info-output">—</dd>
+            </div>
+          </dl>
+          <p class="footnote">
+            Keyboard: <span class="kbd">Space</span> pause,
+            <span class="kbd">C</span> layout, <span class="kbd">M</span> colour
+            scale, <span class="kbd">←</span> <span class="kbd">→</span> comparison
+            position.
+          </p>
+          <p class="footnote">
+            Depth is relative and affine-invariant, not metric. Identical
+            brightness in two different frames does not imply identical distance.
+          </p>
+        </section>
+      </aside>
+    </div>
   </body>
 </html>

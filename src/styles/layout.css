@@ -1,0 +1,146 @@
+/*
+ * Layout.
+ *
+ * Desktop: a fixed status rail on top, the viewer filling the remaining space
+ * and a control column on the right. Below 1024px the control column moves
+ * under the viewer; below 768px it becomes a bottom sheet that starts open,
+ * because hiding the camera selector behind a gesture is worse than losing
+ * a little viewer height.
+ *
+ * 100dvh rather than 100vh: mobile browser chrome would otherwise push the
+ * bottom sheet off screen.
+ */
+
+.app {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-rows: var(--rail-h) 1fr;
+  grid-template-columns: 1fr var(--panel-w);
+  grid-template-areas:
+    "rail rail"
+    "stage controls";
+  height: 100dvh;
+  gap: 0;
+}
+
+.rail {
+  grid-area: rail;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent),
+    var(--bg-panel);
+  backdrop-filter: blur(var(--blur-glass)) saturate(var(--saturate-glass));
+}
+
+.stage {
+  grid-area: stage;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--space-4);
+  display: flex;
+}
+
+.controls {
+  grid-area: controls;
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-inset-top);
+  padding: var(--space-4) var(--space-4) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* Viewer ------------------------------------------------------------------ */
+
+.viewer {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: 1fr 1fr;
+}
+
+.viewer[data-mode="compare"] {
+  grid-template-columns: 1fr;
+}
+
+.viewer[data-mode="compare"] .pane {
+  grid-area: 1 / 1;
+}
+
+/* In compare mode the depth pane is clipped from the split position rightwards
+   so the raw camera shows through on the left. The video element itself is
+   never hidden — WebKit stops delivering frames to a display:none video. */
+.viewer[data-mode="compare"] .pane--depth {
+  clip-path: inset(0 0 0 var(--split, 50%));
+}
+
+/* Stacked panes would otherwise put both labels and both readouts in the same
+   corner. Keep one label per side and drop the readouts, which are already in
+   the control column. */
+.viewer[data-mode="compare"] .pane--depth .pane__label {
+  left: auto;
+  right: var(--space-3);
+}
+
+.viewer[data-mode="compare"] .pane__meta {
+  display: none;
+}
+
+/* The legend lives inside the depth pane, so in comparison mode it has to start
+   after the divider or the clip cuts its "far" end off. */
+.viewer[data-mode="compare"] .legend {
+  left: calc(var(--split, 50%) + var(--space-3));
+}
+
+@media (max-width: 1023px) {
+  .app {
+    grid-template-rows: var(--rail-h) 1fr auto;
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "rail"
+      "stage"
+      "controls";
+    height: 100dvh;
+  }
+
+  .controls {
+    border-left: none;
+    border-top: 1px solid var(--border);
+    max-height: 46dvh;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-4);
+    align-content: start;
+    padding-bottom: max(var(--space-5), env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 767px) {
+  .stage {
+    padding: var(--space-3);
+  }
+
+  .viewer {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 1fr;
+  }
+
+  .viewer[data-mode="compare"] {
+    grid-template-rows: 1fr;
+  }
+
+  .controls {
+    grid-template-columns: 1fr;
+    max-height: 42dvh;
+  }
+}
