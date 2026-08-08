@@ -16,7 +16,10 @@
   z-index: 1;
   display: grid;
   grid-template-rows: var(--rail-h) 1fr;
-  grid-template-columns: 1fr var(--panel-w);
+  /* minmax(0, 1fr) rather than 1fr: a plain 1fr track cannot shrink below the
+     min-content width of its contents, so a long status readout would widen
+     the whole page instead of being clipped. */
+  grid-template-columns: minmax(0, 1fr) var(--panel-w);
   grid-template-areas:
     "rail rail"
     "stage controls";
@@ -26,6 +29,7 @@
 
 .rail {
   grid-area: rail;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: var(--space-4);
@@ -105,7 +109,7 @@
 @media (max-width: 1023px) {
   .app {
     grid-template-rows: var(--rail-h) 1fr auto;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       "rail"
       "stage"

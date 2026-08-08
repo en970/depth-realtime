@@ -144,11 +144,38 @@ await page.keyboard.press("m");
 
 for (const width of [390, 768, 1024, 1440]) {
   await page.setViewportSize({ width, height: 820 });
-  await page.waitForTimeout(200);
-  const overflow = await page.evaluate(
-    () => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+  // Two frames, so the canvas has resized its drawing buffer before measuring.
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
   );
-  check(`no horizontal overflow at ${width}px`, !overflow);
+  await page.waitForTimeout(300);
+
+  const overflow = await page.evaluate(() => {
+    const limit = document.documentElement.clientWidth;
+    const offenders = [];
+    for (const element of document.querySelectorAll("*")) {
+      const rect = element.getBoundingClientRect();
+      if (rect.right > limit + 1) {
+        offenders.push(
+          `${element.tagName.toLowerCase()}.${String(element.className).split(" ")[0]}@${Math.round(rect.right)}`,
+        );
+      }
+    }
+    return {
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: limit,
+      offenders: offenders.slice(0, 4),
+    };
+  });
+
+  check(
+    `no horizontal overflow at ${width}px`,
+    overflow.scrollWidth <= overflow.clientWidth + 1,
+    overflow.offenders.join(", "),
+  );
 }
 
 check("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 2).join(" | "));
