@@ -121,6 +121,27 @@
         <section class="group">
           <h2 class="group__title">View</h2>
           <div class="field">
+            <label class="field__label" for="structure-range">
+              Relief shading
+              <span class="field__value" id="structure-value">0.60</span>
+            </label>
+            <input
+              class="range"
+              id="structure-range"
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value="0.6"
+            />
+            <p class="field__hint">
+              Darkens the far side of each silhouette and shades hollows and
+              ridges, so surface curvature reads as shape rather than as a flat
+              band of colour. Applied as a bounded gain, so the colour scale
+              still orders depth correctly.
+            </p>
+          </div>
+          <div class="field">
             <span class="field__label" id="mode-label">Layout</span>
             <div class="segmented" role="group" aria-labelledby="mode-label">
               <button class="segmented__item" type="button" data-mode="split" aria-pressed="true">

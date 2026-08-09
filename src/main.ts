@@ -53,6 +53,8 @@ const adaptiveToggle = $<HTMLInputElement>("adaptive-toggle");
 const qualityToggle = $<HTMLInputElement>("quality-toggle");
 const guideRange = $<HTMLInputElement>("guide-range");
 const guideValue = $<HTMLElement>("guide-value");
+const structureRange = $<HTMLInputElement>("structure-range");
+const structureValue = $<HTMLElement>("structure-value");
 const compareInput = $<HTMLInputElement>("compare-input");
 const infoBackend = $<HTMLElement>("info-backend");
 const infoDtype = $<HTMLElement>("info-dtype");
@@ -75,6 +77,8 @@ interface Settings {
   /** Strength of camera-guided edge-aware upsampling, 0 to 1. */
   guide: number;
   guideSigma: number;
+  /** Relief shading strength: depth darkening plus curvature. */
+  structure: number;
   quality: boolean;
 }
 
@@ -91,6 +95,7 @@ const defaults: Settings = {
   split: 50,
   guide: 0.85,
   guideSigma: 0.06,
+  structure: 0.6,
   quality: false,
 };
 
@@ -136,6 +141,9 @@ function readSettings(): Partial<Settings> {
   const guide = pickNumber("guide", 0, 1);
   if (guide !== null) out.guide = guide;
 
+  const structure = pickNumber("structure", 0, 1);
+  if (structure !== null) out.structure = structure;
+
   // Advanced, URL only: how different the camera pixel has to be before a depth
   // sample stops counting. Exposed for tuning runs rather than for the panel.
   const sigma = pickNumber("sigma", 0.005, 0.5);
@@ -164,6 +172,7 @@ function persistSettings(): void {
       smooth: settings.smoothing.toFixed(2),
       split: settings.split.toFixed(0),
       guide: settings.guide.toFixed(2),
+      structure: settings.structure.toFixed(2),
       mirror: settings.mirror ? "1" : "0",
       adaptive: settings.adaptive ? "1" : "0",
       quality: settings.quality ? "1" : "0",
@@ -637,6 +646,16 @@ function applyQuality(enabled: boolean): void {
 
   applyResolution(enabled ? 518 : isMobile ? 224 : 322, true);
   applyGuide(enabled ? 1 : 0.85);
+  applyStructure(enabled ? 0.8 : 0.6);
+  persistSettings();
+}
+
+function applyStructure(value: number): void {
+  settings.structure = value;
+  structureRange.value = String(value);
+  structureValue.textContent = value.toFixed(2);
+  setRangeFill(structureRange);
+  renderer.setStructure(value);
   persistSettings();
 }
 
@@ -826,6 +845,10 @@ smoothingRange.addEventListener("input", () => {
 
 guideRange.addEventListener("input", () => applyGuide(Number(guideRange.value)));
 
+structureRange.addEventListener("input", () =>
+  applyStructure(Number(structureRange.value)),
+);
+
 qualityToggle.addEventListener("change", () => applyQuality(qualityToggle.checked));
 
 adaptiveToggle.addEventListener("change", () => {
@@ -908,7 +931,14 @@ applyColormap(settings.colormap);
 applyMirror(settings.mirror);
 applySplit(settings.split);
 applyGuide(settings.guide);
-if (settings.quality) applyQuality(true);
+applyStructure(settings.structure);
+
+// Reflect a stored quality flag without re-running the preset: the values it
+// would set are already restored, and re-applying them would overwrite anything
+// given explicitly in the URL.
+qualityToggle.checked = settings.quality;
+adaptiveToggle.disabled = settings.quality;
+document.body.classList.toggle("is-quality", settings.quality);
 adaptiveToggle.checked = settings.adaptive;
 resolutionRange.value = String(settings.resolution);
 resolutionValue.textContent = `${settings.resolution} px`;

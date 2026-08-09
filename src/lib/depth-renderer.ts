@@ -43,6 +43,7 @@ uniform vec2 uCover;       // uv scale that reproduces CSS object-fit: cover
 uniform vec2 uDepthTexel;  // 1 / depth texture size
 uniform float uGuideAmount; // 0 = plain bilinear, 1 = full edge-aware weighting
 uniform float uRangeSigma;  // guide luma difference that halves the weight
+uniform float uStructure;   // 0 = flat ramp, 1 = full relief shading
 
 float hash(vec2 p) {
   return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
@@ -103,6 +104,44 @@ void main() {
   float lutWidth = float(textureSize(uLut, 0).x);
   float lutU = (clamp(t, 0.0, 1.0) * (lutWidth - 1.0) + 0.5) / lutWidth;
   vec3 rgb = texture(uLut, vec2(lutU, 0.5)).rgb;
+
+  if (uStructure > 0.001) {
+    // Relief shading, in two scales, both read from the mip chain so no extra
+    // blur pass is needed.
+    //
+    // Wide radius (Luft, Colditz and Deussen 2006, "depth darkening"): where
+    // the field sits below its own neighbourhood, a silhouette has a far side.
+    // Darkening only that side draws a halo around every object, which
+    // separates two things painted the same shade of blue without needing any
+    // colour contrast — and unlike surface shading it does not fall apart at
+    // distance, because it keys on a large depth step rather than a small
+    // slope.
+    //
+    // Tight radius: the same quantity at one texel, which is curvature.
+    // Hollows darken and ridges lift, so knuckles, folds and a table edge stop
+    // being flat patches of one colour.
+    //
+    // Both are read from uCurr alone. Taking them from the cross-faded value
+    // would draw a moving edge as two half-steps and shade it as a double
+    // ridge.
+    float centre = texture(uCurr, uv).r;
+    float wide = mix(textureLod(uCurr, uv, 2.0).r, textureLod(uCurr, uv, 4.0).r, 0.5);
+    float tight = textureLod(uCurr, uv, 1.0).r;
+
+    float halo = min(centre - wide, 0.0) * 6.0;
+    float curvature = centre - tight;
+    float cavity = min(curvature, 0.0) * 8.0 + max(curvature, 0.0) * 4.0;
+
+    // Applied as a bounded gain in linear light, never as an overlay blend. The
+    // colour table is the only carrier of the value: lightness order is depth
+    // order, and a full-swing overlay would invert that order across half the
+    // range. At these limits the ordering is uncertain over about 4% of the
+    // range, which is the model's own frame-to-frame noise.
+    float gain = clamp(1.0 + uStructure * (halo + cavity), 0.86, 1.10);
+    vec3 linear = pow(rgb, vec3(2.2)) * gain;
+    rgb = pow(max(linear, 0.0), vec3(1.0 / 2.2));
+  }
+
   fragColor = vec4(rgb, 1.0);
 }`;
 
@@ -128,6 +167,7 @@ export class DepthRenderer {
   private guideSource: HTMLVideoElement | null = null;
   private guideAmount = 0;
   private rangeSigma = 0.06;
+  private structure = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -160,7 +200,7 @@ export class DepthRenderer {
     this.uniforms = {};
     for (const name of [
       "uPrev", "uCurr", "uLut", "uGuide", "uMix", "uCover",
-      "uDepthTexel", "uGuideAmount", "uRangeSigma",
+      "uDepthTexel", "uGuideAmount", "uRangeSigma", "uStructure",
     ]) {
       this.uniforms[name] = gl.getUniformLocation(this.program, name);
     }
@@ -206,6 +246,11 @@ export class DepthRenderer {
     this.dirty = true;
   }
 
+  setStructure(amount: number): void {
+    this.structure = amount;
+    this.dirty = true;
+  }
+
   private uploadGuide(): void {
     const source = this.guideSource;
     if (!source || this.guideAmount <= 0.001) return;
@@ -227,7 +272,9 @@ export class DepthRenderer {
     // would need OES_texture_float_linear and silently yields an incomplete
     // texture on several mobile drivers.
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    // Mipmapped: relief shading reads a blurred copy of the field from the mip
+    // chain, which costs one extra fetch instead of a separate blur pass.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
@@ -277,6 +324,8 @@ export class DepthRenderer {
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, data);
     }
 
+    gl.generateMipmap(gl.TEXTURE_2D);
+
     // Swap: the freshly written slot becomes `curr`, the previously shown one
     // becomes `prev` and is blended out.
     this.prev = this.curr;
@@ -289,6 +338,7 @@ export class DepthRenderer {
       const other = this.prev;
       gl.bindTexture(gl.TEXTURE_2D, other.texture);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, data);
+      gl.generateMipmap(gl.TEXTURE_2D);
       other.width = width;
       other.height = height;
       this.mixDuration = 1;
@@ -364,6 +414,7 @@ export class DepthRenderer {
     );
     gl.uniform1f(this.uniforms.uGuideAmount, guided ? this.guideAmount : 0);
     gl.uniform1f(this.uniforms.uRangeSigma, this.rangeSigma);
+    gl.uniform1f(this.uniforms.uStructure, this.structure);
 
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }

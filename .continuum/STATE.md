@@ -7,12 +7,18 @@ sonucu gelince yüzey gölgelendirme ve büyük model kararları verilecek.
 
 # Sıradaki adım
 
-Görev 4: yüzey gölgelendirme (normal-from-depth + yapay ışık) fragment shader'a.
-`src/lib/depth-renderer.ts` içinde renk aramasından hemen önce, derinlik
-alanından merkezi farkla normal hesapla ve Lambert terimiyle parlaklığı modüle
-et; renk skalasının sırası bozulmamalı (legend hâlâ geçerli kalmalı). Kontrolü
-`index.html` içindeki Model grubuna slider olarak ekle, ölçümü
-`SCENES=demo01,demo20 node tests/quality.mjs` ile yap.
+Görev 5: eş derinlik kontur çizgileri (açılıp kapanabilir). Ardından görev 6
+(salınımlı 3B) ve 7 (nokta bulutu).
+
+Araştırmanın önerdiği ve HENÜZ YAPILMAYAN iki şey:
+1. Gate'li hillshade (Sobel + half-Lambert, NNW ışık vec3(-0.2706, 0.6533,
+   0.7071), uExag 5-25). Depth darkening'in üstüne yüzey yönü hissi ekler.
+   ZORUNLU: gradyan gürültü tabanına göre `smoothstep(uFloor, 4*uFloor, |grad|)`
+   gate'i — onsuz uzak duvarlar teras teras olur (ölçülmüş: 3 m'deki duvarın
+   eğimi gürültü tabanının 24 katı ALTINDA).
+2. Gölgelemeyi 350x196'lık bir FBO'da hesaplayıp ekran geçişini sadece
+   büyütmeye bırakmak. Gölgelemenin taşıdığı bilgi alanın çözünürlüğünden ince
+   olamaz; şu an ekran çözünürlüğünde hesaplanıyor (zayıf Android GPU'da ~2 ms).
 
 # Tamamlananlar
 
@@ -25,6 +31,10 @@ et; renk skalasının sırası bozulmamalı (legend hâlâ geçerli kalmalı). K
   `guide` slider'ı, varsayılan 0.85; sigma URL'den (`sigma=`) ayarlanabilir.
   Ölçüm: edgeAlignment 5.78 -> 6.38 (+%10), fps 11.75 -> 11.4
 - Kalite modu eklendi: 518 px girdi + tam rehber + adaptif kapalı, ~5 fps
+- Kabartma gölgelemesi (depth darkening + cavity) eklendi: mip zincirinden
+  okunuyor, ayrı blur geçişi yok. Ölçüm: edgeAlignment 4.32 -> 5.97 (+%38),
+  highFrequency 24.9 -> 45.4 (+%82), drift 8.78 -> 5.44. Görsel fark büyük:
+  gölgelemesiz yüz düz beyaz leke, gölgelemeli burun/göz/çene hattı okunuyor.
 - Temel uygulama çalışıyor ve canlıda: https://en970.github.io/depth-realtime/
 - Yön (dikey ters), en-boy oranı (cover formülü tersti) ve kadraj (panel kutusu
   kamera oranına uymuyordu, yatay FOV'un ~%64'ü atılıyordu) düzeltildi
@@ -48,6 +58,20 @@ Bu titreme, kullanıcının "ayrıntı yok" izlenimini besliyor olabilir: karars
 bir alan gözde bulanık algılanır.
 
 # Ölçülmüş bulgular
+
+- Kalite modu ön ayarı açılışta YENİDEN UYGULANMAMALI: uyguladığında URL'den
+  gelen res/guide/structure değerlerini eziyordu ve iki karşılaştırma varyantı
+  aynı ayarla çalışıyordu. Artık açılışta yalnızca UI durumu yansıtılıyor.
+  Test scriptleri de her koşuda localStorage temizliyor.
+- Gölgeleme harmanı LINEER ışıkta sınırlı kazanç olmalı (clamp 0.86-1.10).
+  Ölçülmüş: matplotlib 'overlay' tam salınımla L* sıralamasını aralığın
+  %52.5'inde TERSİNE çeviriyor, 'soft light' %43.1. Sınırlı kazançta belirsizlik
+  ~%4, yani modelin kendi kare-arası gürültüsü mertebesinde.
+- Gölgeleme cross-fade edilmiş değerden DEĞİL, yalnızca uCurr'dan hesaplanmalı:
+  mix=0.5'te hareketli bir kenar iki yarım basamak olur ve çift sırt çizilir.
+- Lisans: learnopengl SSAO kodu CC BY-NC, Blender cavity shader GPL. İkisi de
+  bu projeye KOPYALANAMAZ; yalnızca tarif seviyesinde yeniden yazılabilir.
+  Luft 2006 (akademik yöntem) ve matplotlib formülleri sorunsuz.
 
 - Çözünürlük 518'in ÜSTÜ ZARARLI: 644'te yüz yapısı düzleşiyor, ayrıntı
   kayboluyor. Model 518'de eğitilmiş; üstü dağılım dışı. LADDER 518'de bitiyor,

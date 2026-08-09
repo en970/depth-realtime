@@ -76,6 +76,9 @@ async function measureScene(scene) {
 
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
+  // A stored preset from an earlier run must not silently override the settings
+  // under test.
+  await page.addInitScript(() => localStorage.clear());
 
   await page.goto(`${BASE_URL}${HASH}`, { waitUntil: "load" });
   await page.click("#overlay-action");
