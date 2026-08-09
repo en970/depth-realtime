@@ -6,7 +6,7 @@ import "./styles/components.css";
 import { Camera } from "./lib/camera";
 import { buildLut, COLORMAPS, cssGradient, type ColormapId } from "./lib/colormaps";
 import { DepthRenderer } from "./lib/depth-renderer";
-import { snapToPatch, type FromWorker, type ToWorker } from "./lib/protocol";
+import { PATCH, snapToPatch, type FromWorker, type ToWorker } from "./lib/protocol";
 
 /* -------------------------------------------------------------------------- */
 /* Elements                                                                    */
@@ -380,9 +380,13 @@ function captureFrame(): void {
   if (!running || paused || inFlight || !modelReady) return;
   if (video.readyState < 2 || !video.videoWidth) return;
 
+  // The worker feeds these dimensions straight to the network, so both edges
+  // must be multiples of the ViT patch size. Rounding here also keeps the
+  // camera's aspect ratio, which is what makes the two panes frame the same
+  // region.
   const scale = settings.resolution / Math.max(video.videoWidth, video.videoHeight);
-  const width = Math.max(14, Math.round(video.videoWidth * scale));
-  const height = Math.max(14, Math.round(video.videoHeight * scale));
+  const width = Math.max(PATCH, Math.round((video.videoWidth * scale) / PATCH) * PATCH);
+  const height = Math.max(PATCH, Math.round((video.videoHeight * scale) / PATCH) * PATCH);
 
   if (capture.width !== width || capture.height !== height) {
     capture.width = width;

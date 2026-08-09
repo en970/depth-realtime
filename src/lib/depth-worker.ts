@@ -15,11 +15,7 @@
  * inversion is applied anywhere in this codebase.
  */
 
-import {
-  AutoModelForDepthEstimation,
-  AutoProcessor,
-  RawImage,
-} from "@huggingface/transformers";
+import { AutoModelForDepthEstimation, Tensor } from "@huggingface/transformers";
 import type {
   Backend,
   Dtype,
@@ -74,9 +70,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   });
 }
 
+/** ImageNet statistics, as declared in the model's preprocessor_config.json. */
+const IMAGENET_MEAN = [0.485, 0.456, 0.406];
+const IMAGENET_STD = [0.229, 0.224, 0.225];
+
 interface Session {
   model: any;
-  processor: any;
   backend: Backend;
   dtype: Dtype;
 }
@@ -171,25 +170,35 @@ async function createSession(
     progress_callback,
   } as any);
 
-  const processor: any = await AutoProcessor.from_pretrained(MODEL_ID, {
-    progress_callback,
-  } as any);
-
-  applyResolution(processor, resolution);
-  return { model, processor, backend, dtype };
+  return { model, backend, dtype };
 }
 
 /**
- * The image processor keeps the aspect ratio and rounds each edge to a multiple
- * of 14, so setting a square target yields a rectangle with the camera's aspect
- * ratio whose longest edge is `size`.
+ * RGBA bytes to a normalised NCHW tensor, in one pass.
+ *
+ * The library's image processor would do the same work, but it also re-runs a
+ * bicubic resize that the capture canvas has already performed and allocates
+ * several intermediate images along the way; measured at 5-8 ms per frame
+ * against roughly 1 ms here. The caller is responsible for supplying dimensions
+ * that are multiples of the ViT patch size.
  */
-function applyResolution(processor: any, size: number): void {
-  const target = processor?.feature_extractor ?? processor?.image_processor ?? processor;
-  if (!target) return;
-  target.size = { width: size, height: size };
-  if ("keep_aspect_ratio" in target) target.keep_aspect_ratio = true;
-  if ("ensure_multiple_of" in target) target.ensure_multiple_of = 14;
+function toTensor(rgba: Uint8ClampedArray, width: number, height: number): Tensor {
+  const pixels = width * height;
+  const data = new Float32Array(3 * pixels);
+  const rScale = 1 / (255 * IMAGENET_STD[0]);
+  const gScale = 1 / (255 * IMAGENET_STD[1]);
+  const bScale = 1 / (255 * IMAGENET_STD[2]);
+  const rShift = IMAGENET_MEAN[0] / IMAGENET_STD[0];
+  const gShift = IMAGENET_MEAN[1] / IMAGENET_STD[1];
+  const bShift = IMAGENET_MEAN[2] / IMAGENET_STD[2];
+
+  for (let i = 0, p = 0; i < pixels; i++, p += 4) {
+    data[i] = rgba[p] * rScale - rShift;
+    data[pixels + i] = rgba[p + 1] * gScale - gShift;
+    data[2 * pixels + i] = rgba[p + 2] * bScale - bShift;
+  }
+
+  return new Tensor("float32", data, [1, 3, height, width]);
 }
 
 /** Percentile bounds via a 1024-bin histogram: ~0.36 ms for a 518x518 field. */
@@ -287,12 +296,11 @@ async function handleFrame(
   const started = performance.now();
 
   try {
-    const image = new RawImage(new Uint8ClampedArray(buffer), width, height, 4);
     const preprocessStart = performance.now();
-    const inputs = await session.processor(image);
+    const pixel_values = toTensor(new Uint8ClampedArray(buffer), width, height);
     const preprocessMs = performance.now() - preprocessStart;
     const output: any = await withTimeout(
-      session.model(inputs),
+      session.model({ pixel_values }),
       TIMEOUTS[session.backend].frame,
       "inference",
     );
@@ -359,22 +367,26 @@ async function handleFrame(
  * than at session creation.
  */
 async function warmUp(candidate: Session): Promise<void> {
-  const size = 98; // 7 x 14
-  const pixels = new Uint8ClampedArray(size * size * 4);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = (y * size + x) * 4;
-      pixels[i] = (x / size) * 255;
-      pixels[i + 1] = (y / size) * 255;
-      pixels[i + 2] = 128;
-      pixels[i + 3] = 255;
+  const width = 126; // 9 x 14
+  const height = 98; // 7 x 14
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      rgba[i] = (x / width) * 255;
+      rgba[i + 1] = (y / height) * 255;
+      rgba[i + 2] = 128;
+      rgba[i + 3] = 255;
     }
   }
 
-  const image = new RawImage(pixels, size, size, 4);
   const budget = TIMEOUTS[candidate.backend].warmup;
-  const inputs = await withTimeout(candidate.processor(image), budget, "preprocess");
-  const output: any = await withTimeout(candidate.model(inputs), budget, "warmup");
+  const pixel_values = toTensor(rgba, width, height);
+  const output: any = await withTimeout(
+    candidate.model({ pixel_values }),
+    budget,
+    "warmup",
+  );
   const tensor = output.predicted_depth ?? output.depth ?? output.logits;
   if (!tensor) throw new Error("Model returned no depth tensor.");
   const data = tensor.data as Float32Array;
@@ -449,8 +461,9 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
   if (message.type === "config") {
     if (typeof message.smoothing === "number") smoothing = message.smoothing;
     if (typeof message.resolution === "number" && message.resolution !== resolution) {
+      // The page decides the framing; the worker only needs to drop its
+      // temporal state, whose buffers are sized to the previous field.
       resolution = message.resolution;
-      if (session) applyResolution(session.processor, resolution);
       resetTemporalState();
     }
     return;
