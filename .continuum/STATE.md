@@ -59,9 +59,11 @@ bir alan gözde bulanık algılanır.
 - GitHub Actions kuyruğu tıkanabiliyor; workflow artık `cancel-in-progress: true`.
 - ONNX Runtime session options denendi ve hepsi elendi (gerekçe
   `src/lib/depth-worker.ts` içinde yorum olarak duruyor) — tekrar denenmesin.
-- `git push --force-with-lease` otomatik izin katmanınca bloklandı; kullanıcı
-  onayı bekliyor. Yerel geçmiş uzaktakinden ayrıştı, o yüzden normal push da
-  reddedilir. Onay gelene kadar commit'ler yerelde birikir.
+- Git geçmişi yeniden yazıldı ve force push edildi; GitHub'daki 11 commit'in
+  hepsi artık en970 hesabına bağlı (doğrulandı). `--force-with-lease` "stale
+  info" derse önce `git fetch origin`, sonra
+  `--force-with-lease=main:$(git rev-parse origin/main)` kullan — filter-branch
+  remote-tracking ref'i de yeniden yazdığı için lease bayatlıyor.
 - Ölçüm sahneleri (y4m) scratchpad'de, repoda değil:
   `.../scratchpad/refdata/{demo01,demo20,hf-depth}.y4m`. Kaybolursa
   Depth-Anything-V2 deposundaki assets/examples/*.jpg dosyalarından
