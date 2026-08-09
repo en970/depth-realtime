@@ -45,6 +45,8 @@
   min-height: 0;
   padding: var(--space-4);
   display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .controls {
@@ -62,14 +64,29 @@
 
 /* Viewer ------------------------------------------------------------------ */
 
+/*
+ * The viewer is sized in script rather than stretched to fill the stage.
+ *
+ * Two 16:9 panes side by side inside a stage that is wider than it is tall
+ * gives each pane a box roughly 0.64:1 — far taller than the camera frame. With
+ * object-fit: cover that box discards about two thirds of the horizontal field
+ * of view, which reads as an image that is zoomed in and squashed. Fitting the
+ * viewer to the source aspect instead keeps the whole frame and puts the unused
+ * space outside the panes, where it belongs.
+ */
 .viewer {
   position: relative;
-  flex: 1;
+  flex: none;
   min-width: 0;
   min-height: 0;
   display: grid;
   gap: var(--space-3);
   grid-template-columns: 1fr 1fr;
+}
+
+.viewer[data-mode="stacked"] {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr 1fr;
 }
 
 .viewer[data-mode="compare"] {

@@ -62,6 +62,8 @@ export interface ErrorMessage {
   type: "error";
   message: string;
   fatal: boolean;
+  /** Backend that must not be retried if the worker is restarted. */
+  poisoned?: Backend;
 }
 
 export type FromWorker = StatusMessage | ReadyMessage | ResultMessage | ErrorMessage;

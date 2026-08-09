@@ -126,12 +126,17 @@ const fps = await page.locator("#stat-fps").innerText();
 const latency = await page.locator("#stat-latency").innerText();
 check("telemetry reports numbers", fps !== "—" && latency !== "—", `${fps} fps, ${latency} ms`);
 
-await page.keyboard.press("c");
+await page.click('.segmented__item[data-mode="compare"]');
 check(
   "comparison layout engages",
   (await page.locator("#viewer").getAttribute("data-mode")) === "compare",
 );
-await page.keyboard.press("c");
+await page.click('.segmented__item[data-mode="stacked"]');
+check(
+  "stacked layout engages",
+  (await page.locator("#viewer").getAttribute("data-mode")) === "stacked",
+);
+await page.click('.segmented__item[data-mode="split"]');
 
 await page.keyboard.press("m");
 check(

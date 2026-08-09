@@ -164,6 +164,14 @@ async function createSession(
     }
   };
 
+  // Deliberately no session_options. Measured on WebGPU/fp16 at 350x196:
+  //   enableGraphCapture      needs IO binding, which the library does not use
+  //   preferredOutputLocation 'gpu-buffer' makes tensor.data throw, and the
+  //                           percentile histogram below runs on the CPU anyway
+  //   freeDimensionOverrides  breaks outright: the resolution ladder walks
+  //                           182..518 at runtime and warm-up runs at 126x98
+  //   graphOptimizationLevel  'all' measured within noise of the default
+  // The cost is dominated by resolution, not by dispatch overhead.
   const model = await AutoModelForDepthEstimation.from_pretrained(MODEL_ID, {
     device: backend,
     dtype,
@@ -425,6 +433,7 @@ async function activateNext(): Promise<void> {
         type: "error",
         message: `${candidate.backend}/${candidate.dtype} unusable: ${message}`,
         fatal: queue.length === 0,
+        poisoned: candidate.backend,
       });
     }
   }

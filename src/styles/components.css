@@ -138,10 +138,11 @@
 .pane::after {
   content: "";
   position: absolute;
-  inset: 0;
+  inset: 0 0 auto 0;
+  height: 42%;
   pointer-events: none;
   background: var(--sheen);
-  border-radius: inherit;
+  border-radius: var(--radius-panel) var(--radius-panel) 0 0;
 }
 
 .pane__media {

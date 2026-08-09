@@ -102,6 +102,23 @@ sampling a smaller window of the texture, never sampling past its edge. Neither
 property is noticeable on a live camera until someone points at it, so
 `tests/renderer.mjs` asserts both against a known field.
 
+**The viewer is sized in script, not stretched.** Two 16:9 panes side by side in
+a stage wider than it is tall gives each pane a box of roughly 0.64:1 — far
+taller than the camera frame — and `object-fit: cover` then discards about two
+thirds of the horizontal field of view. The viewer is therefore fitted to the
+camera's aspect ratio so the whole frame survives and the unused space falls
+outside the panes. CSS alone cannot express this: the panes are limited by the
+stage width in one layout and by its height in another, and `aspect-ratio` stops
+preserving the ratio once the second limit binds.
+
+**One worker restart on a fatal failure.** Transformers.js serialises web
+inference through a module-scoped promise chain with no rejection handler, so a
+genuine `session.run()` rejection leaves that chain permanently rejected: every
+later call fails immediately with the original error, including calls on a
+freshly created session. The state cannot be cleared from inside the realm, so
+the page discards the worker and starts a new one, carrying forward which
+backend must not be tried again.
+
 **WebGL2 for display, WebGPU only for inference.** WebGPU reached Safari with
 version 26; making the visualisation depend on it would exclude every device
 still on iOS 18–25, as well as Firefox on Linux. WebGL2 is available on
@@ -162,6 +179,11 @@ is not premature optimisation: sustained GPU load throttles phones severely, and
 published measurements show roughly 40 % throughput loss within a minute of
 continuous inference. A fixed resolution would either waste desktop headroom or
 collapse on mobile.
+
+Three layouts are available: side by side, stacked, and a comparison slider that
+overlays the two and wipes between them. Stacked gives each pane roughly 1.8x
+the area on a typical laptop screen, since a 16:9 pane is limited by the stage
+height rather than its width when two of them share a row.
 
 Input resolution, temporal smoothing and the colour scale can be set manually;
 the state is written to the URL fragment, so a particular configuration can be

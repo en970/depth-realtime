@@ -21,6 +21,7 @@ const $ = <T extends HTMLElement>(id: string): T => {
 const video = $<HTMLVideoElement>("camera");
 const depthCanvas = $<HTMLCanvasElement>("depth");
 const viewer = $<HTMLElement>("viewer");
+const stage = document.querySelector<HTMLElement>(".stage")!;
 
 const overlay = $<HTMLElement>("overlay");
 const overlayKicker = $<HTMLElement>("overlay-kicker");
@@ -58,7 +59,7 @@ const infoOutput = $<HTMLElement>("info-output");
 /* State                                                                       */
 /* -------------------------------------------------------------------------- */
 
-type Mode = "split" | "compare";
+type Mode = "split" | "stacked" | "compare";
 
 interface Settings {
   mode: Mode;
@@ -108,7 +109,7 @@ function readSettings(): Partial<Settings> {
   };
 
   const mode = pick("mode");
-  if (mode === "split" || mode === "compare") out.mode = mode;
+  if (mode === "split" || mode === "stacked" || mode === "compare") out.mode = mode;
 
   const colormap = pick("cmap");
   if (colormap && colormap in COLORMAPS) out.colormap = colormap as ColormapId;
@@ -163,9 +164,50 @@ function persistSettings(): void {
 const renderer = new DepthRenderer(depthCanvas);
 renderer.setColormap(buildLut(settings.colormap));
 
-const worker = new Worker(new URL("./lib/depth-worker.ts", import.meta.url), {
-  type: "module",
-});
+let worker = spawnWorker();
+let restarts = 0;
+
+/**
+ * The worker is replaceable, not a constant.
+ *
+ * Transformers.js serialises web inference through a module-scoped promise
+ * chain that has no rejection handler, so a genuine session.run() rejection
+ * leaves the chain permanently rejected: every subsequent call, including one
+ * on a freshly created session, fails immediately with the original error. That
+ * state cannot be cleared from inside the realm, so recovery means discarding
+ * the worker and starting a new one.
+ */
+function spawnWorker(): Worker {
+  const instance = new Worker(new URL("./lib/depth-worker.ts", import.meta.url), {
+    type: "module",
+  });
+  instance.onmessage = handleWorkerMessage;
+  instance.onerror = handleWorkerError;
+  instance.onmessageerror = () => {
+    inFlight = false;
+  };
+  return instance;
+}
+
+function restartWorker(poisoned?: "webgpu" | "wasm"): boolean {
+  if (restarts >= 1) return false;
+  restarts++;
+  worker.terminate();
+  modelReady = false;
+  inFlight = false;
+  recovering = true;
+  worker = spawnWorker();
+  send({
+    type: "init",
+    resolution: settings.resolution,
+    smoothing: settings.smoothing,
+    mobile: isMobile,
+    // A new worker would otherwise re-derive the same candidate list and walk
+    // straight back into the backend that just failed.
+    force: poisoned === "webgpu" ? "wasm" : undefined,
+  });
+  return true;
+}
 
 const capture = document.createElement("canvas");
 const captureCtx = capture.getContext("2d", { willReadFrequently: true })!;
@@ -189,6 +231,10 @@ const camera = new Camera(video, {
 let modelReady = false;
 let running = false;
 let paused = false;
+/** Set while the worker is rebuilding a session. Frames captured during that
+ *  window would be dropped by the worker without a reply, and the in-flight
+ *  flag would stay raised for ever. */
+let recovering = false;
 let frameId = 0;
 let inFlight = false;
 let lastResultAt = 0;
@@ -200,6 +246,10 @@ let lastAdaptation = 0;
 
 const LADDER = [182, 196, 224, 252, 280, 322, 350, 392, 434, 476, 518];
 
+/** Must match --space-4 and --space-3 in the stylesheet. */
+const GUTTER = 16;
+const GAP = 12;
+
 /* -------------------------------------------------------------------------- */
 /* Worker messages                                                             */
 /* -------------------------------------------------------------------------- */
@@ -207,8 +257,8 @@ const LADDER = [182, 196, 224, 252, 280, 322, 350, 392, 434, 476, 518];
 const send = (message: ToWorker, transfer?: Transferable[]) =>
   worker.postMessage(message, transfer ?? []);
 
-// Without these the worker can die silently and the page just stops updating.
-worker.onerror = (event) => {
+// Without this the worker can die silently and the page just stops updating.
+function handleWorkerError(event: ErrorEvent): void {
   inFlight = false;
   running = false;
   setStatus("error", "Failed");
@@ -220,11 +270,7 @@ worker.onerror = (event) => {
     tone: "error",
     onAction: () => location.reload(),
   });
-};
-
-worker.onmessageerror = () => {
-  inFlight = false;
-};
+}
 
 /** Diagnostic hook. Call `depthDiagnostics()` from the browser console to see
  *  why the pipeline is idle. Documented in the README. */
@@ -241,7 +287,7 @@ worker.onmessageerror = () => {
   videoSize: [video.videoWidth, video.videoHeight],
 });
 
-worker.onmessage = (event: MessageEvent<FromWorker>) => {
+function handleWorkerMessage(event: MessageEvent<FromWorker>): void {
   const message = event.data;
 
   switch (message.type) {
@@ -271,6 +317,10 @@ worker.onmessage = (event: MessageEvent<FromWorker>) => {
 
     case "ready": {
       modelReady = true;
+      recovering = false;
+      // A recovery leaves a frame permanently in flight: the worker dropped it
+      // while it had no session, so no result or error ever came back.
+      inFlight = false;
       overlayProgress.hidden = true;
       infoBackend.textContent = message.backend === "webgpu" ? "WebGPU" : "WASM (1 thread)";
       infoDtype.textContent = message.dtype;
@@ -279,7 +329,12 @@ worker.onmessage = (event: MessageEvent<FromWorker>) => {
       }
       if (camera.active) {
         hideOverlay();
-        startLoop();
+        if (running) {
+          setStatus("live", "Live");
+          scheduleCapture();
+        } else {
+          startLoop();
+        }
       }
       break;
     }
@@ -322,24 +377,35 @@ worker.onmessage = (event: MessageEvent<FromWorker>) => {
     case "error": {
       inFlight = false;
       if (message.fatal) {
+        if (restartWorker(message.poisoned)) {
+          setStatus("warn", "Restarting");
+          showOverlay({
+            kicker: "Inference",
+            title: "Restarting the inference worker",
+            text: "The previous session could not run on this device; retrying on a different backend.",
+            action: null,
+          });
+          break;
+        }
         running = false;
         setStatus("error", "Failed");
-        console.error(`[depth] ${message.message}`);
         showOverlay({
           kicker: "Inference",
           title: "The model could not run on this device",
           text: message.message,
-          action: "Try again",
+          action: "Reload",
           tone: "error",
+          onAction: () => location.reload(),
         });
       } else {
+        recovering = true;
         setStatus("warn", "Recovering");
         console.warn(`[depth] ${message.message}`);
       }
       break;
     }
   }
-};
+}
 
 /* -------------------------------------------------------------------------- */
 /* Frame loop                                                                  */
@@ -377,7 +443,7 @@ function scheduleCapture(): void {
 }
 
 function captureFrame(): void {
-  if (!running || paused || inFlight || !modelReady) return;
+  if (!running || paused || inFlight || recovering || !modelReady) return;
   if (video.readyState < 2 || !video.videoWidth) return;
 
   // The worker feeds these dimensions straight to the network, so both edges
@@ -422,15 +488,24 @@ function adapt(now: number): void {
   // whereas 10 updates a second reads as stuttering however sharp each one is.
   const budget = isMobile ? 80 : 45;
 
+  // Nearest rung rather than exact match: the slider steps by 14 and reaches 25
+  // values, the ladder holds 11 of them. indexOf returned -1 for the rest, which
+  // silently disabled adaptation as soon as anyone touched the slider.
+  const index = LADDER.reduce(
+    (best, value, i) =>
+      Math.abs(value - settings.resolution) < Math.abs(LADDER[best] - settings.resolution)
+        ? i
+        : best,
+    0,
+  );
+
   if (latencyEma > budget * 1.3 && now - lastAdaptation > 2500) {
-    const index = LADDER.indexOf(settings.resolution);
     if (index > 0) {
       lastAdaptation = now;
       applyResolution(LADDER[index - 1], false);
     }
   } else if (latencyEma < budget * 0.55 && now - lastAdaptation > 6000) {
-    const index = LADDER.indexOf(settings.resolution);
-    if (index >= 0 && index < LADDER.length - 1) {
+    if (index < LADDER.length - 1) {
       lastAdaptation = now;
       applyResolution(LADDER[index + 1], false);
     }
@@ -478,6 +553,7 @@ function setStatus(state: "idle" | "live" | "warn" | "error", label: string): vo
 function applyMode(mode: Mode): void {
   settings.mode = mode;
   viewer.dataset.mode = mode;
+  fitViewer();
   document.querySelectorAll<HTMLButtonElement>(".segmented__item[data-mode]").forEach((button) => {
     button.setAttribute("aria-pressed", String(button.dataset.mode === mode));
   });
@@ -530,6 +606,39 @@ function applySplit(value: number): void {
   persistSettings();
 }
 
+/**
+ * Sizes the viewer so every pane has exactly the camera's aspect ratio.
+ *
+ * Doing this in script rather than CSS because the constraint is
+ * two-dimensional: the panes are limited by the stage width in one layout and
+ * by its height in another, and `aspect-ratio` with `max-width`/`max-height`
+ * does not preserve the ratio once the second limit binds.
+ */
+function fitViewer(): void {
+  const source = camera.resolution;
+  const aspect = source ? source.width / source.height : 16 / 9;
+  const availableWidth = stage.clientWidth - GUTTER * 2;
+  const availableHeight = stage.clientHeight - GUTTER * 2;
+  if (availableWidth <= 0 || availableHeight <= 0) return;
+
+  // Narrow viewports always stack, whatever the chosen layout, because two
+  // panes side by side would each be too small to read.
+  const vertical = settings.mode === "stacked" || window.innerWidth <= 767;
+  const columns = settings.mode === "compare" ? 1 : vertical ? 1 : 2;
+  const rows = settings.mode === "compare" ? 1 : vertical ? 2 : 1;
+
+  // Try filling the width first, then fall back to filling the height.
+  let paneWidth = (availableWidth - GAP * (columns - 1)) / columns;
+  let paneHeight = paneWidth / aspect;
+  if (paneHeight * rows + GAP * (rows - 1) > availableHeight) {
+    paneHeight = (availableHeight - GAP * (rows - 1)) / rows;
+    paneWidth = paneHeight * aspect;
+  }
+
+  viewer.style.width = `${Math.floor(paneWidth * columns + GAP * (columns - 1))}px`;
+  viewer.style.height = `${Math.floor(paneHeight * rows + GAP * (rows - 1))}px`;
+}
+
 /** Fills the track to the left of the thumb; WebKit has no ::-moz-range-progress. */
 function setRangeFill(input: HTMLInputElement): void {
   const min = Number(input.min);
@@ -580,6 +689,7 @@ async function startCamera(deviceId?: string): Promise<void> {
   await refreshDevices();
   const resolution = camera.resolution;
   if (resolution) metaCamera.textContent = `${resolution.width}x${resolution.height}`;
+  fitViewer();
   toggleStream.textContent = "Stop";
 
   if (!modelReady) {
@@ -682,9 +792,11 @@ document.addEventListener("keydown", (event) => {
       setStatus(paused ? "warn" : "live", paused ? "Paused" : "Live");
       break;
     case "c":
-    case "C":
-      applyMode(settings.mode === "split" ? "compare" : "split");
+    case "C": {
+      const order: Mode[] = ["split", "stacked", "compare"];
+      applyMode(order[(order.indexOf(settings.mode) + 1) % order.length]);
       break;
+    }
     case "m":
     case "M": {
       const ids = Object.keys(COLORMAPS) as ColormapId[];
@@ -711,6 +823,16 @@ document.addEventListener("visibilitychange", () => {
 
 window.addEventListener("pagehide", () => camera.stop());
 
+new ResizeObserver(() => fitViewer()).observe(stage);
+// The camera can renegotiate its resolution mid-stream, most often when a phone
+// is rotated, so neither the fit nor the readout can be computed once at
+// start-up.
+video.addEventListener("resize", () => {
+  fitViewer();
+  const resolution = camera.resolution;
+  if (resolution) metaCamera.textContent = `${resolution.width}x${resolution.height}`;
+});
+
 /* Telemetry, updated on a slow clock so screen readers are not flooded. */
 setInterval(() => {
   statFps.textContent = fpsEma > 0 ? fpsEma.toFixed(1) : "—";
@@ -727,6 +849,7 @@ setInterval(() => {
 /* -------------------------------------------------------------------------- */
 
 applyMode(settings.mode);
+fitViewer();
 applyColormap(settings.colormap);
 applyMirror(settings.mirror);
 applySplit(settings.split);

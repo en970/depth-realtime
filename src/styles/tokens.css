@@ -23,7 +23,10 @@
   --glass: rgba(255, 255, 255, 0.045);
   --glass-strong: rgba(255, 255, 255, 0.08);
   --scrim: rgba(4, 6, 11, 0.62);
-  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0) 42%);
+  /* Ends at 100% because .pane::after is only 42% tall; together they reproduce
+     the full-height gradient exactly while leaving the lower half of each pane
+     free of an extra transparent composite pass over live video. */
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0) 100%);
   --grid-line: rgba(255, 255, 255, 0.028);
   --grain-opacity: 0.03;
 
