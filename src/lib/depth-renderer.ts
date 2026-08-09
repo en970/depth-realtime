@@ -37,18 +37,62 @@ out vec4 fragColor;
 uniform sampler2D uPrev;
 uniform sampler2D uCurr;
 uniform sampler2D uLut;
+uniform sampler2D uGuide;  // camera frame at full resolution
 uniform float uMix;        // 0 = show uPrev, 1 = show uCurr
 uniform vec2 uCover;       // uv scale that reproduces CSS object-fit: cover
+uniform vec2 uDepthTexel;  // 1 / depth texture size
+uniform float uGuideAmount; // 0 = plain bilinear, 1 = full edge-aware weighting
+uniform float uRangeSigma;  // guide luma difference that halves the weight
 
 float hash(vec2 p) {
   return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+float luma(vec3 c) {
+  return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+float depthAt(vec2 uv) {
+  return mix(texture(uPrev, uv).r, texture(uCurr, uv).r, uMix);
 }
 
 void main() {
   // The worker already normalises to [0, 1] against smoothed percentile bounds,
   // so the shader has nothing left to rescale.
   vec2 uv = clamp((vUv - 0.5) * uCover + 0.5, 0.0, 1.0);
-  float t = mix(texture(uPrev, uv).r, texture(uCurr, uv).r, uMix);
+
+  float t;
+  if (uGuideAmount <= 0.001) {
+    t = depthAt(uv);
+  } else {
+    // Cross-bilateral upsampling. The depth field is perhaps 350 px across and
+    // the pane is three times that, so plain bilinear magnification smears each
+    // silhouette over several screen pixels. Re-weighting the depth samples by
+    // how similar the *camera* pixel is at the same place pulls the depth edge
+    // back onto the object outline, because the camera has the resolution the
+    // depth field lacks.
+    float centre = luma(texture(uGuide, uv).rgb);
+    float sum = 0.0;
+    float weightSum = 0.0;
+
+    // 5x5 in depth-texel steps: wide enough to reach across a magnified texel,
+    // small enough to stay one pass.
+    for (int y = -2; y <= 2; y++) {
+      for (int x = -2; x <= 2; x++) {
+        vec2 offset = vec2(float(x), float(y)) * uDepthTexel;
+        vec2 sampleUv = clamp(uv + offset, 0.0, 1.0);
+
+        float spatial = exp(-float(x * x + y * y) / 4.0);
+        float difference = luma(texture(uGuide, sampleUv).rgb) - centre;
+        float range = exp(-(difference * difference) / (2.0 * uRangeSigma * uRangeSigma));
+
+        float weight = spatial * mix(1.0, range, uGuideAmount);
+        sum += weight * depthAt(sampleUv);
+        weightSum += weight;
+      }
+    }
+    t = sum / max(weightSum, 1e-5);
+  }
 
   // Half-LSB dither. The ice ramp is smooth enough that flat walls would
   // otherwise show visible bands in an 8-bit canvas.
@@ -80,6 +124,10 @@ export class DepthRenderer {
   private frames = 0;
   private dirty = false;
   private readonly canvas: HTMLCanvasElement;
+  private guideTexture!: WebGLTexture;
+  private guideSource: HTMLVideoElement | null = null;
+  private guideAmount = 0;
+  private rangeSigma = 0.06;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -110,17 +158,65 @@ export class DepthRenderer {
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
     this.uniforms = {};
-    for (const name of ["uPrev", "uCurr", "uLut", "uMix", "uCover"]) {
+    for (const name of [
+      "uPrev", "uCurr", "uLut", "uGuide", "uMix", "uCover",
+      "uDepthTexel", "uGuideAmount", "uRangeSigma",
+    ]) {
       this.uniforms[name] = gl.getUniformLocation(this.program, name);
     }
 
     this.prev = this.createSlot();
     this.curr = this.createSlot();
     this.lutTexture = this.createLutTexture();
+    this.guideTexture = this.createGuideTexture();
 
     gl.uniform1i(this.uniforms.uPrev, 0);
     gl.uniform1i(this.uniforms.uCurr, 1);
     gl.uniform1i(this.uniforms.uLut, 2);
+    gl.uniform1i(this.uniforms.uGuide, 3);
+  }
+
+  private createGuideTexture(): WebGLTexture {
+    const gl = this.gl;
+    const texture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+      new Uint8Array([0, 0, 0, 255]),
+    );
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return texture;
+  }
+
+  /**
+   * Supplies the camera frame used to steer edge-aware upsampling. Uploading
+   * straight from the video element avoids the intermediate canvas draw and the
+   * readback that a CPU copy would cost.
+   */
+  setGuide(source: HTMLVideoElement | null): void {
+    this.guideSource = source;
+  }
+
+  setGuideStrength(amount: number, rangeSigma = 0.06): void {
+    this.guideAmount = amount;
+    this.rangeSigma = Math.max(0.005, rangeSigma);
+    this.dirty = true;
+  }
+
+  private uploadGuide(): void {
+    const source = this.guideSource;
+    if (!source || this.guideAmount <= 0.001) return;
+    if (source.readyState < 2 || source.videoWidth === 0) return;
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.guideTexture);
+    // No flip: the depth texture is uploaded unflipped too, and the vertex
+    // stage already inverts v. Flipping only one of the two would sample the
+    // guide upside down relative to the depth it is steering.
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);
   }
 
   private createSlot(): Slot {
@@ -228,7 +324,10 @@ export class DepthRenderer {
 
     // The image is static between inference results, so redrawing at display
     // refresh rate burns a full-screen fragment pass for an identical frame.
-    if (!resized && !this.dirty && mix >= 1) return;
+    // With a live guide the camera keeps moving underneath, so the guided pass
+    // has to keep up with it.
+    const guided = this.guideAmount > 0.001 && this.guideSource !== null;
+    if (!guided && !resized && !this.dirty && mix >= 1) return;
     if (mix >= 1) this.dirty = false;
 
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
@@ -246,15 +345,25 @@ export class DepthRenderer {
         : [canvasAspect / texAspect, 1];
 
     gl.useProgram(this.program);
+    this.uploadGuide();
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.prev.texture);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.curr.texture);
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.guideTexture);
 
     gl.uniform1f(this.uniforms.uMix, mix);
     gl.uniform2f(this.uniforms.uCover, cover[0], cover[1]);
+    gl.uniform2f(
+      this.uniforms.uDepthTexel,
+      1 / Math.max(1, this.curr.width),
+      1 / Math.max(1, this.curr.height),
+    );
+    gl.uniform1f(this.uniforms.uGuideAmount, guided ? this.guideAmount : 0);
+    gl.uniform1f(this.uniforms.uRangeSigma, this.rangeSigma);
 
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }

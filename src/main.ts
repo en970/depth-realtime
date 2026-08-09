@@ -50,6 +50,9 @@ const resolutionValue = $<HTMLElement>("resolution-value");
 const smoothingRange = $<HTMLInputElement>("smoothing-range");
 const smoothingValue = $<HTMLElement>("smoothing-value");
 const adaptiveToggle = $<HTMLInputElement>("adaptive-toggle");
+const qualityToggle = $<HTMLInputElement>("quality-toggle");
+const guideRange = $<HTMLInputElement>("guide-range");
+const guideValue = $<HTMLElement>("guide-value");
 const compareInput = $<HTMLInputElement>("compare-input");
 const infoBackend = $<HTMLElement>("info-backend");
 const infoDtype = $<HTMLElement>("info-dtype");
@@ -69,6 +72,10 @@ interface Settings {
   mirror: boolean;
   adaptive: boolean;
   split: number;
+  /** Strength of camera-guided edge-aware upsampling, 0 to 1. */
+  guide: number;
+  guideSigma: number;
+  quality: boolean;
 }
 
 const isMobile =
@@ -82,6 +89,9 @@ const defaults: Settings = {
   mirror: true,
   adaptive: true,
   split: 50,
+  guide: 0.85,
+  guideSigma: 0.06,
+  quality: false,
 };
 
 const settings: Settings = { ...defaults, ...readSettings() };
@@ -123,11 +133,22 @@ function readSettings(): Partial<Settings> {
   const split = pickNumber("split", 0, 100);
   if (split !== null) out.split = split;
 
+  const guide = pickNumber("guide", 0, 1);
+  if (guide !== null) out.guide = guide;
+
+  // Advanced, URL only: how different the camera pixel has to be before a depth
+  // sample stops counting. Exposed for tuning runs rather than for the panel.
+  const sigma = pickNumber("sigma", 0.005, 0.5);
+  if (sigma !== null) out.guideSigma = sigma;
+
   const mirror = pick("mirror");
   if (mirror !== null) out.mirror = mirror === "1" || mirror === "true";
 
   const adaptive = pick("adaptive");
   if (adaptive !== null) out.adaptive = adaptive === "1" || adaptive === "true";
+
+  const quality = pick("quality");
+  if (quality !== null) out.quality = quality === "1" || quality === "true";
 
   return out;
 }
@@ -142,8 +163,10 @@ function persistSettings(): void {
       res: String(settings.resolution),
       smooth: settings.smoothing.toFixed(2),
       split: settings.split.toFixed(0),
+      guide: settings.guide.toFixed(2),
       mirror: settings.mirror ? "1" : "0",
       adaptive: settings.adaptive ? "1" : "0",
+      quality: settings.quality ? "1" : "0",
     });
     history.replaceState(null, "", `#${params.toString()}`);
     try {
@@ -163,6 +186,7 @@ function persistSettings(): void {
 
 const renderer = new DepthRenderer(depthCanvas);
 renderer.setColormap(buildLut(settings.colormap));
+renderer.setGuide(video);
 
 let worker = spawnWorker();
 let restarts = 0;
@@ -244,6 +268,10 @@ let preprocessEma = 0;
 let fpsEma = 0;
 let lastAdaptation = 0;
 
+// Stops at 518, the resolution Depth Anything V2 was trained at. Measured at
+// 644 the output is visibly *worse* — facial structure flattens out — because
+// the input leaves the distribution the model saw. Going higher is not a
+// quality knob, it is a cliff.
 const LADDER = [182, 196, 224, 252, 280, 322, 350, 392, 434, 476, 518];
 
 /** Must match --space-4 and --space-3 in the stylesheet. */
@@ -583,6 +611,35 @@ function applySmoothing(value: number): void {
   persistSettings();
 }
 
+function applyGuide(value: number): void {
+  settings.guide = value;
+  guideRange.value = String(value);
+  guideValue.textContent = value.toFixed(2);
+  setRangeFill(guideRange);
+  renderer.setGuideStrength(value, settings.guideSigma);
+  persistSettings();
+}
+
+/**
+ * Quality is a preset, not a separate pipeline: it pins the input to the
+ * resolution the network was trained at, turns the guided upsampling fully on
+ * and stops the adaptive controller from trading that away. It costs roughly
+ * half the frame rate, which is why it is opt-in.
+ */
+function applyQuality(enabled: boolean): void {
+  settings.quality = enabled;
+  qualityToggle.checked = enabled;
+  document.body.classList.toggle("is-quality", enabled);
+
+  settings.adaptive = !enabled;
+  adaptiveToggle.checked = settings.adaptive;
+  adaptiveToggle.disabled = enabled;
+
+  applyResolution(enabled ? 518 : isMobile ? 224 : 322, true);
+  applyGuide(enabled ? 1 : 0.85);
+  persistSettings();
+}
+
 function applyMirror(mirror: boolean): void {
   settings.mirror = mirror;
   mirrorToggle.checked = mirror;
@@ -767,6 +824,10 @@ smoothingRange.addEventListener("input", () => {
   applySmoothing(Number(smoothingRange.value));
 });
 
+guideRange.addEventListener("input", () => applyGuide(Number(guideRange.value)));
+
+qualityToggle.addEventListener("change", () => applyQuality(qualityToggle.checked));
+
 adaptiveToggle.addEventListener("change", () => {
   settings.adaptive = adaptiveToggle.checked;
   persistSettings();
@@ -846,6 +907,8 @@ fitViewer();
 applyColormap(settings.colormap);
 applyMirror(settings.mirror);
 applySplit(settings.split);
+applyGuide(settings.guide);
+if (settings.quality) applyQuality(true);
 adaptiveToggle.checked = settings.adaptive;
 resolutionRange.value = String(settings.resolution);
 resolutionValue.textContent = `${settings.resolution} px`;

@@ -146,6 +146,16 @@
 
         <section class="group">
           <h2 class="group__title">Model</h2>
+          <label class="switch">
+            Quality mode
+            <input type="checkbox" id="quality-toggle" />
+            <span class="switch__track"></span>
+          </label>
+          <p class="field__hint">
+            Runs the network at the resolution it was trained on and applies the
+            guided upsampling in full. Roughly half the frame rate, noticeably
+            more structure.
+          </p>
           <div class="field">
             <label class="field__label" for="resolution-range">
               Input resolution
@@ -182,6 +192,27 @@
             <p class="field__hint">
               Blends each depth frame with the previous one. Suppresses flicker;
               high values leave a motion trail.
+            </p>
+          </div>
+          <div class="field">
+            <label class="field__label" for="guide-range">
+              Edge-aware detail
+              <span class="field__value" id="guide-value">0.85</span>
+            </label>
+            <input
+              class="range"
+              id="guide-range"
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value="0.85"
+            />
+            <p class="field__hint">
+              Steers the depth map by the camera image, so depth edges land on
+              object outlines instead of being smeared across them by
+              magnification. Too high on a strongly patterned surface can let
+              texture bleed into the depth.
             </p>
           </div>
           <label class="switch">

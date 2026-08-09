@@ -1,19 +1,18 @@
 # Şu an
 
-Görev 1 ve 2 bitti: ölçüm düzeneği kuruldu ve taban çizgisi kaydedildi.
-Kalite araştırması (5 eksenli workflow, run wf_ae9c86ae-7be) arka planda
-çalışıyor; sonucu Faz 1'in uygulama sırasını belirleyecek.
+Görev 1-3 ve 8'in ilk hâli bitti: ölçüm düzeneği, taban çizgisi, kamera rehberli
+kenar korumalı yükseltme ve Kalite modu (518 px + tam rehber) yayında değil ama
+yerelde çalışıyor. Kalite araştırması (workflow wf_ae9c86ae-7be) hâlâ çalışıyor;
+sonucu gelince yüzey gölgelendirme ve büyük model kararları verilecek.
 
 # Sıradaki adım
 
-Araştırma sonucu geldiğinde Görev 3'e başla: kenar korumalı yükseltme
-(cross-bilateral / guided filter) `src/lib/depth-renderer.ts` içindeki fragment
-shader'a. Kamera görüntüsünü rehber olarak shader'a bağlamak gerekiyor — şu an
-video ayrı bir DOM elementi, WebGL context'inde dokusu yok; her karede
-`texImage2D(video)` maliyetini ölç.
-
-Araştırma gelmeden önce yapılabilecek ayrı iş: sabit girdide ölçülen 7.16/255
-zamansal kaymanın kaynağını bul (aşağıya bak) — bu muhtemelen gerçek bir hata.
+Görev 4: yüzey gölgelendirme (normal-from-depth + yapay ışık) fragment shader'a.
+`src/lib/depth-renderer.ts` içinde renk aramasından hemen önce, derinlik
+alanından merkezi farkla normal hesapla ve Lambert terimiyle parlaklığı modüle
+et; renk skalasının sırası bozulmamalı (legend hâlâ geçerli kalmalı). Kontrolü
+`index.html` içindeki Model grubuna slider olarak ekle, ölçümü
+`SCENES=demo01,demo20 node tests/quality.mjs` ile yap.
 
 # Tamamlananlar
 
@@ -22,6 +21,10 @@ zamansal kaymanın kaynağını bul (aşağıya bak) — bu muhtemelen gerçek b
 - Taban çizgisi `.continuum/quality/baseline.json`: edgeAlignment 5.891,
   highFrequency 24.15, temporalDrift 7.158, 9.6 fps (ölçüm modunda res=350 sabit,
   adaptive kapalı, üç sahne ortalaması)
+- Kamera rehberli kenar korumalı yükseltme (5x5 cross-bilateral) eklendi:
+  `guide` slider'ı, varsayılan 0.85; sigma URL'den (`sigma=`) ayarlanabilir.
+  Ölçüm: edgeAlignment 5.78 -> 6.38 (+%10), fps 11.75 -> 11.4
+- Kalite modu eklendi: 518 px girdi + tam rehber + adaptif kapalı, ~5 fps
 - Temel uygulama çalışıyor ve canlıda: https://en970.github.io/depth-realtime/
 - Yön (dikey ters), en-boy oranı (cover formülü tersti) ve kadraj (panel kutusu
   kamera oranına uymuyordu, yatay FOV'un ~%64'ü atılıyordu) düzeltildi
@@ -43,6 +46,21 @@ sabit çıktı vermeli. Olası kaynaklar, denenme sırası:
 4. Normalizasyon sınırlarının EMA'sı sabit girdide yakınsamıyor olabilir.
 Bu titreme, kullanıcının "ayrıntı yok" izlenimini besliyor olabilir: kararsız
 bir alan gözde bulanık algılanır.
+
+# Ölçülmüş bulgular
+
+- Çözünürlük 518'in ÜSTÜ ZARARLI: 644'te yüz yapısı düzleşiyor, ayrıntı
+  kayboluyor. Model 518'de eğitilmiş; üstü dağılım dışı. LADDER 518'de bitiyor,
+  slider max 518. Bu bir kalite düğmesi değil, uçurum.
+- Zamansal yumuşatma (smooth=0.35) ayrıntıya ZARAR VERMİYOR: edgeAlignment
+  6.34 (smooth=0) -> 6.42 (0.35), drift 3.80 -> 2.39. Önceki "zarar veriyor"
+  sonucu kararsız ölçümden gelmişti; medyan alma bunu düzeltti.
+- Rehber sigma taraması (tek sahne, 3 tekrar, gürültülü): 0.03 en yüksek
+  edgeAlignment ama drift 4x; 0.25 çok kararlı ama filtre düz gauss'a dönüyor.
+  0.06 makul denge olarak seçildi. Daha güvenilir tarama için REPEATS>=7 ve
+  en az 2 sahne gerekir.
+- Ölçüm gürültüsü ayarlara göre değişiyor: spread %4 ile %141 arasında. Küçük
+  farklar (<%10) tek koşuyla değerlendirilemez.
 
 # Bilinmesi gerekenler
 
