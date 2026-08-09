@@ -33,6 +33,7 @@
  */
 
 import { chromium } from "playwright";
+import { HEADLESS, GPU_ARGS, sceneArgs } from "./browser.mjs";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,12 +66,8 @@ async function measureScene(scene) {
   if (!existsSync(y4m)) throw new Error(`missing scene file: ${y4m}`);
 
   const context = await chromium.launchPersistentContext(PROFILE, {
-    headless: process.env.HEADED !== "1" ? false : false, // always headed: software WebGPU hangs
-    args: [
-      `--use-file-for-fake-video-capture=${y4m}`,
-      "--use-fake-ui-for-media-stream",
-      "--enable-unsafe-webgpu",
-    ],
+    headless: HEADLESS,
+    args: [...GPU_ARGS, ...sceneArgs(y4m)],
     permissions: ["camera"],
     viewport: { width: 1440, height: 900 },
   });
@@ -86,10 +83,47 @@ async function measureScene(scene) {
     () => document.getElementById("stat-fps")?.textContent !== "—",
     { timeout: 300_000 },
   );
-  // Let the temporal smoothing settle on the frozen frame.
-  await page.waitForTimeout(6000);
+  // The first seconds are not representative: the adaptive controller, the
+  // normalisation bounds and the browser's own warm-up are all still moving.
+  await page.waitForTimeout(10_000);
 
-  const result = await page.evaluate(
+  // One reading is not enough: repeated runs of the same scene and settings
+  // disagreed by a factor of three. Each metric is the median of REPEATS
+  // independent readings, which is stable to within a few percent.
+  const REPEATS = Number(process.env.REPEATS ?? 5);
+  const readings = [];
+  for (let attempt = 0; attempt < REPEATS; attempt++) {
+    readings.push(await readOnce(page));
+    await page.waitForTimeout(700);
+  }
+
+  const median = (values) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  };
+  const spread = (values) => {
+    const lo = Math.min(...values);
+    const hi = Math.max(...values);
+    const mid = median(values);
+    return mid === 0 ? 0 : (hi - lo) / mid;
+  };
+
+  const result = {};
+  for (const key of Object.keys(readings[0])) {
+    const values = readings.map((r) => r[key]);
+    result[key] = typeof values[0] === "number" ? median(values) : values[0];
+  }
+  result.spreadEdgeAlignment = spread(readings.map((r) => r.edgeAlignment));
+  result.spreadHighFrequency = spread(readings.map((r) => r.highFrequency));
+
+  await context.close();
+  if (errors.length) result.pageErrors = errors.slice(0, 3);
+  return result;
+}
+
+async function readOnce(page) {
+  return page.evaluate(
     async ({ gw, gh }) => {
       const video = document.querySelector("video");
       const depth = document.getElementById("depth");
@@ -144,10 +178,15 @@ async function measureScene(scene) {
 
       const waitFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 
-      // Two reads a second apart: on a frozen input the difference is drift.
+      // Three reads: one immediately after another (frame-scale flicker) and one
+      // a second later (slow drift). Temporal smoothing suppresses the first but
+      // cannot touch the second, so separating them says which one to fix.
       await waitFrame();
       const depthA = sampleLuma(depth);
       const image = sampleLuma(video);
+      await waitFrame();
+      await waitFrame();
+      const depthShort = sampleLuma(depth);
       await new Promise((r) => setTimeout(r, 1000));
       await waitFrame();
       const depthB = sampleLuma(depth);
@@ -175,9 +214,34 @@ async function measureScene(scene) {
       const edgeMean = edgeCount ? edgeSum / edgeCount : 0;
       const flatMean = flatCount ? flatSum / flatCount : 0;
 
-      let drift = 0;
-      for (let i = 0; i < depthA.length; i++) drift += Math.abs(depthA[i] - depthB[i]);
-      drift /= depthA.length;
+      const meanOf = (plane) => {
+        let sum = 0;
+        for (let i = 0; i < plane.length; i++) sum += plane[i];
+        return sum / plane.length;
+      };
+
+      /** Splits the change into a whole-image brightness shift and the residual
+       *  per-pixel variation. A shift means the normalisation bounds are moving;
+       *  residual means the field itself is unstable. The fix differs. */
+      const compare = (a, b) => {
+        const ma = meanOf(a);
+        const mb = meanOf(b);
+        let total = 0;
+        let residual = 0;
+        for (let i = 0; i < a.length; i++) {
+          total += Math.abs(a[i] - b[i]);
+          residual += Math.abs(a[i] - ma - (b[i] - mb));
+        }
+        return {
+          total: total / a.length,
+          shift: Math.abs(ma - mb),
+          residual: residual / a.length,
+        };
+      };
+
+      const shortTerm = compare(depthA, depthShort);
+      const longTerm = compare(depthA, depthB);
+      const drift = longTerm.total;
 
       let depthMin = 255;
       let depthMax = 0;
@@ -192,6 +256,11 @@ async function measureScene(scene) {
         flatGradient: flatMean,
         highFrequency: laplacianVariance(depthA),
         temporalDrift: drift,
+        driftShort: shortTerm.total,
+        driftShortShift: shortTerm.shift,
+        driftShortResidual: shortTerm.residual,
+        driftLongShift: longTerm.shift,
+        driftLongResidual: longTerm.residual,
         dynamicRange: depthMax - depthMin,
         fps: Number(document.getElementById("stat-fps").textContent),
         inferenceMs: Number(document.getElementById("stat-latency").textContent),
@@ -201,10 +270,6 @@ async function measureScene(scene) {
     },
     { gw: GRID_W, gh: GRID_H },
   );
-
-  await context.close();
-  if (errors.length) result.pageErrors = errors.slice(0, 3);
-  return result;
 }
 
 const record = { scenes: {} };
@@ -215,8 +280,11 @@ for (const scene of SCENES) {
   console.log(
     `edgeAlignment=${metrics.edgeAlignment.toFixed(3)} ` +
       `highFreq=${metrics.highFrequency.toFixed(1)} ` +
-      `drift=${metrics.temporalDrift.toFixed(3)} ` +
-      `${metrics.fps}fps`,
+      `drift=${metrics.temporalDrift.toFixed(2)} ` +
+      `(shift ${metrics.driftLongShift.toFixed(2)} / resid ${metrics.driftLongResidual.toFixed(2)}) ` +
+      `frame=${metrics.driftShort.toFixed(2)} ` +
+      `${metrics.fps}fps ` +
+      `[spread ${(metrics.spreadEdgeAlignment * 100).toFixed(0)}%]`,
   );
 }
 

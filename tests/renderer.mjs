@@ -13,10 +13,11 @@
  */
 
 import { chromium } from "playwright";
+import { HEADLESS, GPU_ARGS } from "./browser.mjs";
 
 const BASE = process.env.DEV_URL ?? "http://127.0.0.1:5173/depth-realtime/";
 
-const browser = await chromium.launch({ headless: process.env.HEADED !== "1" });
+const browser = await chromium.launch({ headless: HEADLESS, args: GPU_ARGS });
 const page = await browser.newPage();
 await page.goto(BASE, { waitUntil: "load" });
 

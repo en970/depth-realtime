@@ -8,22 +8,18 @@
  * texture format, the tensor layout or the shader is wrong.
  *
  *   npm run preview
- *   node tests/smoke.mjs                 # headless; falls back to WASM
- *   HEADED=1 node tests/smoke.mjs        # real GPU, exercises the WebGPU path
- *
- * Headless Chromium exposes a software WebGPU adapter on which ONNX Runtime
- * hangs at first inference. That is a property of the test environment, not of
- * the site — and the run below is also how the fallback path gets tested.
+ *   node tests/smoke.mjs            # headless, real GPU, no window
+ *   HEADED=1 node tests/smoke.mjs   # same but with a window, kept off-screen
  */
 
 import { chromium } from "playwright";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { HEADLESS, GPU_ARGS, FAKE_CAMERA_ARGS } from "./browser.mjs";
 
 const URL_UNDER_TEST =
   process.env.URL ?? "http://127.0.0.1:4173/depth-realtime/#res=182&smooth=0";
-const HEADLESS = process.env.HEADED !== "1";
 const READY_TIMEOUT = Number(process.env.READY_TIMEOUT ?? 300_000);
 // A persistent profile keeps the browser cache between runs, so repeat runs skip
 // the weight download entirely.
@@ -31,11 +27,7 @@ const PROFILE = process.env.PROFILE ?? mkdtempSync(join(tmpdir(), "depth-smoke-"
 
 const context = await chromium.launchPersistentContext(PROFILE, {
   headless: HEADLESS,
-  args: [
-    "--use-fake-device-for-media-stream",
-    "--use-fake-ui-for-media-stream",
-    "--enable-unsafe-webgpu",
-  ],
+  args: [...GPU_ARGS, ...FAKE_CAMERA_ARGS],
   permissions: ["camera"],
 });
 context.setDefaultTimeout(READY_TIMEOUT);
