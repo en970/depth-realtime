@@ -37,29 +37,18 @@ out vec4 fragColor;
 uniform sampler2D uPrev;
 uniform sampler2D uCurr;
 uniform sampler2D uLut;
-uniform vec2 uPrevRange;   // normalisation bounds captured with uPrev
-uniform vec2 uCurrRange;   // normalisation bounds captured with uCurr
 uniform float uMix;        // 0 = show uPrev, 1 = show uCurr
-uniform float uGamma;
 uniform vec2 uCover;       // uv scale that reproduces CSS object-fit: cover
 
 float hash(vec2 p) {
   return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
 }
 
-float normalised(float raw, vec2 range) {
-  return clamp((raw - range.x) / max(range.y - range.x, 1e-6), 0.0, 1.0);
-}
-
 void main() {
-  vec2 uv = (vUv - 0.5) * uCover + 0.5;
-  uv = clamp(uv, 0.0, 1.0);
-
-  float prev = normalised(texture(uPrev, uv).r, uPrevRange);
-  float curr = normalised(texture(uCurr, uv).r, uCurrRange);
-  float t = mix(prev, curr, uMix);
-
-  t = pow(t, uGamma);
+  // The worker already normalises to [0, 1] against smoothed percentile bounds,
+  // so the shader has nothing left to rescale.
+  vec2 uv = clamp((vUv - 0.5) * uCover + 0.5, 0.0, 1.0);
+  float t = mix(texture(uPrev, uv).r, texture(uCurr, uv).r, uMix);
 
   // Half-LSB dither. The ice ramp is smooth enough that flat walls would
   // otherwise show visible bands in an 8-bit canvas.
@@ -77,8 +66,6 @@ interface Slot {
   texture: WebGLTexture;
   width: number;
   height: number;
-  lo: number;
-  hi: number;
 }
 
 export class DepthRenderer {
@@ -90,7 +77,6 @@ export class DepthRenderer {
   private curr: Slot;
   private mixStart = 0;
   private mixDuration = 1;
-  private gamma = 1;
   private frames = 0;
   private dirty = false;
   private readonly canvas: HTMLCanvasElement;
@@ -124,10 +110,7 @@ export class DepthRenderer {
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
     this.uniforms = {};
-    for (const name of [
-      "uPrev", "uCurr", "uLut", "uPrevRange", "uCurrRange",
-      "uMix", "uGamma", "uCover",
-    ]) {
+    for (const name of ["uPrev", "uCurr", "uLut", "uMix", "uCover"]) {
       this.uniforms[name] = gl.getUniformLocation(this.program, name);
     }
 
@@ -152,7 +135,7 @@ export class DepthRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    return { texture, width: 1, height: 1, lo: 0, hi: 1 };
+    return { texture, width: 1, height: 1 };
   }
 
   private createLutTexture(): WebGLTexture {
@@ -174,11 +157,6 @@ export class DepthRenderer {
     this.dirty = true;
   }
 
-  setGamma(value: number): void {
-    this.gamma = value;
-    this.dirty = true;
-  }
-
   get hasFrame(): boolean {
     return this.frames > 0;
   }
@@ -187,14 +165,7 @@ export class DepthRenderer {
    * Uploads a new depth field. `transitionMs` should be the observed interval
    * between results so the blend finishes exactly as the next one arrives.
    */
-  push(
-    data: Uint8Array,
-    width: number,
-    height: number,
-    lo: number,
-    hi: number,
-    transitionMs: number,
-  ): void {
+  push(data: Uint8Array, width: number, height: number, transitionMs: number): void {
     const gl = this.gl;
     const target = this.prev; // the slot not currently displayed becomes the new target
 
@@ -209,8 +180,6 @@ export class DepthRenderer {
     } else {
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, data);
     }
-    target.lo = lo;
-    target.hi = hi;
 
     // Swap: the freshly written slot becomes `curr`, the previously shown one
     // becomes `prev` and is blended out.
@@ -226,8 +195,6 @@ export class DepthRenderer {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, data);
       other.width = width;
       other.height = height;
-      other.lo = lo;
-      other.hi = hi;
       this.mixDuration = 1;
     } else {
       this.mixDuration = Math.max(16, Math.min(transitionMs, 400));
@@ -286,10 +253,7 @@ export class DepthRenderer {
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
 
-    gl.uniform2f(this.uniforms.uPrevRange, this.prev.lo, this.prev.hi);
-    gl.uniform2f(this.uniforms.uCurrRange, this.curr.lo, this.curr.hi);
     gl.uniform1f(this.uniforms.uMix, mix);
-    gl.uniform1f(this.uniforms.uGamma, this.gamma);
     gl.uniform2f(this.uniforms.uCover, cover[0], cover[1]);
 
     gl.drawArrays(gl.TRIANGLES, 0, 3);

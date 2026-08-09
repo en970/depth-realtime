@@ -49,7 +49,7 @@ const result = await page.evaluate(async () => {
   }
   for (let y = 0; y < h; y++) field[y * w + 1] = 255;
 
-  renderer.push(field, w, h, 0, 1, 1);
+  renderer.push(field, w, h, 1);
 
   const sample = () =>
     new Promise((resolve) => {
@@ -77,7 +77,7 @@ const result = await page.evaluate(async () => {
     });
 
   const readings = await sample();
-  renderer.push(field, w, h, 0, 1, 1);
+  renderer.push(field, w, h, 1);
   const second = await sample();
 
   // Aspect behaviour. The texture is 2:1. Widening the canvas to 4:1 must crop
@@ -94,7 +94,7 @@ const result = await page.evaluate(async () => {
   document.body.append(wide);
   const wideRenderer = new DepthRenderer(wide);
   wideRenderer.setColormap(buildLut("gray"));
-  wideRenderer.push(band, w, h, 0, 1, 1);
+  wideRenderer.push(band, w, h, 1);
 
   const wideReading = await new Promise((resolve) => {
     requestAnimationFrame((now) => {

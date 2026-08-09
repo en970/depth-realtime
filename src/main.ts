@@ -354,14 +354,7 @@ function handleWorkerMessage(event: MessageEvent<FromWorker>): void {
           ? message.preprocessMs
           : preprocessEma * 0.8 + message.preprocessMs * 0.2;
 
-      renderer.push(
-        new Uint8Array(message.buffer),
-        message.width,
-        message.height,
-        0,
-        1,
-        interval,
-      );
+      renderer.push(new Uint8Array(message.buffer), message.width, message.height, interval);
       metaDepth.textContent = `${message.width}x${message.height}`;
       infoOutput.textContent = `${message.width}x${message.height}`;
       adapt(now);
