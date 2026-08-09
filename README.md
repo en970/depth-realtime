@@ -28,28 +28,29 @@ invites a numerical reading that the model does not support.
 ## Method
 
 ```
-  camera ──► <video>                            (playback, always visible)
+  camera ──► <video>                           (playback, always visible)
                 │
-                │ requestVideoFrameCallback      one callback per camera frame
+                │ requestVideoFrameCallback, plus an immediate re-arm each time
+                │ a result arrives, so inference never waits for the camera
                 ▼
-           2D canvas ──► ImageData ──────────►  Web Worker
-                                                    │
-                                    image processor │ resize to a multiple of 14,
-                                                    │ aspect ratio preserved,
-                                                    │ ImageNet normalisation
-                                                    ▼
-                                    Depth Anything V2 Small (ONNX)
-                                       WebGPU, or WASM where unavailable
-                                                    │
-                                                    │ inverse depth, float32
-                                                    ▼
-                              p2/p98 histogram bounds ──► asymmetric EMA
-                                                    │
-                                       per-pixel exponential average
-                                                    │
-                                    normalised [0,1] field (transferred)
-                                                    ▼
-  depth pane ◄── WebGL2 fragment shader ◄──── R16F texture + 256×1 colour LUT
+      2D canvas, scaled to a multiple of 14 ──► ImageData ──► Web Worker
+                                                                 │
+                                        one pass: RGBA to NCHW,  │
+                                        rescale and ImageNet     │
+                                        normalisation folded in  │
+                                                                 ▼
+                                          Depth Anything V2 Small (ONNX)
+                                            WebGPU, or WASM where unavailable
+                                                                 │
+                                                                 │ inverse depth
+                                                                 ▼
+                                    p2/p98 histogram bounds ──► asymmetric EMA
+                                                                 │
+                                                    per-pixel exponential average
+                                                                 │
+                                              8-bit normalised field (transferred)
+                                                                 ▼
+  depth pane ◄── WebGL2 fragment shader ◄──── R8 texture + 256×1 colour LUT
 ```
 
 Design decisions worth stating explicitly:
@@ -73,15 +74,33 @@ about 0.4 ms per frame.
 **Colouring on the GPU, statistics on the CPU.** Computing the histogram over
 the small network output is cheap. Colouring at display resolution on the CPU is
 not: roughly 10 ms per 1080p frame, several times that on a phone. The depth
-field is therefore uploaded as a small single-channel `R16F` texture and
-magnified by the sampler, with the colour ramp applied in a fragment shader.
+field is therefore uploaded as a small single-channel `R8` texture and magnified
+by the sampler, with the colour ramp applied in a fragment shader. Eight bits
+are enough because the field is a normalised ramp rather than measurement data,
+and the shader dithers by half a least significant bit to break up banding.
+
+**Preprocessing by hand.** The library's image processor re-ran a bicubic resize
+that the capture canvas had already performed and allocated several intermediate
+images on the way to an NCHW tensor: 5.4 ms per frame measured. Converting the
+RGBA bytes directly, with the rescale and the ImageNet normalisation folded into
+one multiply-add per channel, costs 0.33 ms.
 
 **Two clocks.** Capture is driven by `requestVideoFrameCallback`, which fires
 once per camera frame rather than once per display refresh; on a 30 fps camera
-and a 60 Hz screen this halves the work. Presentation runs on
-`requestAnimationFrame` and interpolates between the last two depth fields, so
-the depth pane remains smooth even when inference is several times slower than
-capture.
+and a 60 Hz screen this halves the work. It is also re-armed the moment a result
+arrives rather than only on the next camera callback — waiting for one cost
+about 16 ms of dead time per cycle, roughly a third of the achievable frame
+rate. Presentation runs on `requestAnimationFrame`, interpolates between the
+last two depth fields so the pane stays smooth when inference is slower than
+capture, and stops redrawing once that blend has finished, since the image is
+static between results.
+
+**Orientation and aspect are pinned by tests.** Row 0 of the tensor is the top
+of the image, but `v = 0` is the bottom of the viewport in clip space, so the
+vertex stage inverts `v`. The cover scale is always at most 1: covering means
+sampling a smaller window of the texture, never sampling past its edge. Neither
+property is noticeable on a live camera until someone points at it, so
+`tests/renderer.mjs` asserts both against a known field.
 
 **WebGL2 for display, WebGPU only for inference.** WebGPU reached Safari with
 version 26; making the visualisation depend on it would exclude every device
@@ -147,6 +166,21 @@ collapse on mobile.
 Input resolution, temporal smoothing and the colour scale can be set manually;
 the state is written to the URL fragment, so a particular configuration can be
 shared or cited.
+
+Measured on an Apple Silicon laptop, WebGPU with fp16 weights, 350x196 network
+input:
+
+| | Before | After |
+| --- | --- | --- |
+| Throughput | 10 fps | 20 fps |
+| Time per inference | 74 ms | 47 ms |
+| Preprocessing within that | 5.4 ms | 0.33 ms |
+| Main-thread frame gap, median | 16.6 ms | 16.6 ms |
+| Main-thread frame gap, p95 | 20.4 ms | 17.7 ms |
+
+The main thread was never the bottleneck; the gains came from removing dead time
+between inferences, from the preprocessing rewrite, and from not redrawing a
+static image sixty times a second.
 
 ## Local development
 
