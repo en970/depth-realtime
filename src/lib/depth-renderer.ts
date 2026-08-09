@@ -2,7 +2,7 @@
  * WebGL2 renderer for the depth map.
  *
  * The network emits a small single-channel field (typically 392x224). Uploading
- * that as an R16F texture and letting the hardware do the bilinear magnification
+ * that as an R8 texture and letting the hardware do the bilinear magnification
  * is effectively free, whereas colouring at display resolution on the CPU costs
  * ~10 ms per 1080p frame and would consume the entire frame budget on mobile.
  *
@@ -21,7 +21,10 @@ const VERT = `#version 300 es
 in vec2 aPos;
 out vec2 vUv;
 void main() {
-  vUv = aPos * 0.5 + 0.5;
+  // Flip v: row 0 of the uploaded tensor is the top of the image, but v = 0 is
+  // the bottom of the viewport in clip space. Without this the depth pane is
+  // upside down relative to the video next to it.
+  vUv = vec2(aPos.x, -aPos.y) * 0.5 + 0.5;
   gl_Position = vec4(aPos, 0.0, 1.0);
 }`;
 
@@ -85,6 +88,7 @@ export class DepthRenderer {
   private mixDuration = 1;
   private gamma = 1;
   private frames = 0;
+  private dirty = false;
   private readonly canvas: HTMLCanvasElement;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -136,9 +140,10 @@ export class DepthRenderer {
     const gl = this.gl;
     const texture = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    // R16F is filterable in core WebGL2; R32F would need OES_texture_float_linear
-    // and silently produces an incomplete texture on several mobile drivers.
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, 1, 1, 0, gl.RED, gl.FLOAT, new Float32Array(1));
+    // R8 is filterable everywhere and a quarter of the bandwidth of R16F. R32F
+    // would need OES_texture_float_linear and silently yields an incomplete
+    // texture on several mobile drivers.
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -162,10 +167,12 @@ export class DepthRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, 256, 1, 0, gl.RGB, gl.UNSIGNED_BYTE, lut);
+    this.dirty = true;
   }
 
   setGamma(value: number): void {
     this.gamma = value;
+    this.dirty = true;
   }
 
   get hasFrame(): boolean {
@@ -177,7 +184,7 @@ export class DepthRenderer {
    * between results so the blend finishes exactly as the next one arrives.
    */
   push(
-    data: Float32Array,
+    data: Uint8Array,
     width: number,
     height: number,
     lo: number,
@@ -188,12 +195,15 @@ export class DepthRenderer {
     const target = this.prev; // the slot not currently displayed becomes the new target
 
     gl.bindTexture(gl.TEXTURE_2D, target.texture);
+    // Row alignment must be 1: single-channel rows are rarely a multiple of 4
+    // (a 350 px wide field is not), and the default of 4 would shear the image.
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     if (target.width !== width || target.height !== height) {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, width, height, 0, gl.RED, gl.FLOAT, data);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, data);
       target.width = width;
       target.height = height;
     } else {
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.FLOAT, data);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, data);
     }
     target.lo = lo;
     target.hi = hi;
@@ -209,7 +219,7 @@ export class DepthRenderer {
       // texSubImage2D would fail with an offset overflow.
       const other = this.prev;
       gl.bindTexture(gl.TEXTURE_2D, other.texture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, width, height, 0, gl.RED, gl.FLOAT, data);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, data);
       other.width = width;
       other.height = height;
       other.lo = lo;
@@ -220,11 +230,14 @@ export class DepthRenderer {
     }
     this.mixStart = performance.now();
     this.frames++;
+    this.dirty = true;
   }
 
-  /** Matches the drawing buffer to the CSS box; capped at 2x device pixels. */
+  /** Matches the drawing buffer to the CSS box. Capped at 1.5x device pixels:
+   *  the depth field is magnified from roughly 350 px across, so denser
+   *  sampling buys nothing while costing fragments linearly. */
   resize(): boolean {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     const width = Math.max(1, Math.round(this.canvas.clientWidth * dpr));
     const height = Math.max(1, Math.round(this.canvas.clientHeight * dpr));
     if (this.canvas.width === width && this.canvas.height === height) return false;
@@ -236,19 +249,28 @@ export class DepthRenderer {
   render(now: number): void {
     if (this.frames === 0) return;
     const gl = this.gl;
-    this.resize();
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
 
     const mix = Math.min(1, (now - this.mixStart) / this.mixDuration);
+    const resized = this.resize();
+
+    // The image is static between inference results, so redrawing at display
+    // refresh rate burns a full-screen fragment pass for an identical frame.
+    if (!resized && !this.dirty && mix >= 1) return;
+    if (mix >= 1) this.dirty = false;
+
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
 
     // object-fit: cover, computed in uv space so the depth pane frames exactly
     // the same region as the video element next to it.
+    // object-fit: cover in uv space. The scale is always <= 1: covering means
+    // sampling a *smaller* window of the texture, never sampling past its edge.
+    // Getting this backwards magnifies the centre and smears the clamped border.
     const canvasAspect = this.canvas.width / this.canvas.height;
     const texAspect = this.curr.width / this.curr.height;
     const cover: [number, number] =
       canvasAspect > texAspect
-        ? [1, canvasAspect / texAspect]
-        : [texAspect / canvasAspect, 1];
+        ? [1, texAspect / canvasAspect]
+        : [canvasAspect / texAspect, 1];
 
     gl.useProgram(this.program);
     gl.activeTexture(gl.TEXTURE0);

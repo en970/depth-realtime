@@ -170,8 +170,10 @@
   padding: 0 9px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: rgba(8, 11, 17, 0.6);
-  backdrop-filter: blur(var(--blur-glass)) saturate(var(--saturate-glass));
+  /* No backdrop-filter here. These sit on top of a live video surface, so the
+     blur would be recomputed every frame for every overlay; an opaque-enough
+     fill reads the same and costs nothing. */
+  background: rgba(8, 11, 17, 0.78);
   font-size: var(--fs-micro);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
@@ -188,8 +190,7 @@
   color: var(--fg-muted);
   padding: 4px 8px;
   border-radius: var(--radius-sm);
-  background: rgba(8, 11, 17, 0.6);
-  backdrop-filter: blur(var(--blur-glass));
+  background: rgba(8, 11, 17, 0.78);
   border: 1px solid var(--border);
 }
 
@@ -207,8 +208,7 @@
   padding: 7px 9px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: rgba(8, 11, 17, 0.6);
-  backdrop-filter: blur(var(--blur-glass));
+  background: rgba(8, 11, 17, 0.8);
 }
 
 .legend__scale {
@@ -287,8 +287,7 @@
   height: 40px;
   border-radius: 50%;
   border: 1px solid var(--border-strong);
-  background: var(--glass-strong);
-  backdrop-filter: blur(var(--blur-glass)) saturate(var(--saturate-glass));
+  background: rgba(22, 27, 38, 0.86);
   box-shadow: var(--shadow-panel);
   pointer-events: none;
   display: grid;

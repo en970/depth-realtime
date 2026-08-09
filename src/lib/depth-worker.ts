@@ -235,7 +235,8 @@ function computeBounds(data: Float32Array): [number, number] {
   return [min + lowBin / scale, min + highBin / scale];
 }
 
-/** Normalises into [0, 1] and applies the per-pixel exponential average. */
+/** Normalises into [0, 1] and applies the per-pixel exponential average. The
+ *  smoothing state stays in float; only the transported copy is quantised. */
 function normalise(data: Float32Array): Float32Array {
   const [lo, hi] = computeBounds(data);
 
@@ -287,7 +288,9 @@ async function handleFrame(
 
   try {
     const image = new RawImage(new Uint8ClampedArray(buffer), width, height, 4);
+    const preprocessStart = performance.now();
     const inputs = await session.processor(image);
+    const preprocessMs = performance.now() - preprocessStart;
     const output: any = await withTimeout(
       session.model(inputs),
       TIMEOUTS[session.backend].frame,
@@ -307,7 +310,14 @@ async function handleFrame(
     }
 
     const normalised = normalise(raw);
-    const copy = new Float32Array(normalised);
+
+    // Transported as 8-bit: a quarter of the bytes to copy, transfer and upload,
+    // and the shader dithers by half an LSB anyway so the quantisation is not
+    // visible. The field is a normalised [0, 1] ramp, not measurement data.
+    const copy = new Uint8Array(normalised.length);
+    for (let i = 0; i < normalised.length; i++) {
+      copy[i] = (normalised[i] * 255 + 0.5) | 0;
+    }
     const ms = performance.now() - started;
 
     post(
@@ -318,6 +328,7 @@ async function handleFrame(
         width: outWidth,
         height: outHeight,
         ms,
+        preprocessMs,
       },
       [copy.buffer],
     );

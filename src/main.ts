@@ -76,7 +76,7 @@ const isMobile =
 const defaults: Settings = {
   mode: "split",
   colormap: "ice",
-  resolution: isMobile ? 266 : 392,
+  resolution: isMobile ? 224 : 322,
   smoothing: 0.35,
   mirror: true,
   adaptive: true,
@@ -194,6 +194,7 @@ let inFlight = false;
 let lastResultAt = 0;
 let interval = 100;
 let latencyEma = 0;
+let preprocessEma = 0;
 let fpsEma = 0;
 let lastAdaptation = 0;
 
@@ -235,6 +236,7 @@ worker.onmessageerror = () => {
   frameId,
   latencyEma,
   fpsEma,
+  preprocessEma,
   videoReady: video.readyState,
   videoSize: [video.videoWidth, video.videoHeight],
 });
@@ -292,9 +294,13 @@ worker.onmessage = (event: MessageEvent<FromWorker>) => {
       }
       lastResultAt = now;
       latencyEma = latencyEma === 0 ? message.ms : latencyEma * 0.8 + message.ms * 0.2;
+      preprocessEma =
+        preprocessEma === 0
+          ? message.preprocessMs
+          : preprocessEma * 0.8 + message.preprocessMs * 0.2;
 
       renderer.push(
-        new Float32Array(message.buffer),
+        new Uint8Array(message.buffer),
         message.width,
         message.height,
         0,
@@ -304,6 +310,12 @@ worker.onmessage = (event: MessageEvent<FromWorker>) => {
       metaDepth.textContent = `${message.width}x${message.height}`;
       infoOutput.textContent = `${message.width}x${message.height}`;
       adapt(now);
+
+      // Start the next inference immediately rather than waiting for the next
+      // camera callback. At 63 ms per inference and a 30 fps camera that wait
+      // added ~16 ms of dead time to every cycle, costing roughly a third of
+      // the achievable frame rate.
+      captureFrame();
       break;
     }
 
@@ -401,7 +413,10 @@ function present(now: number): void {
  */
 function adapt(now: number): void {
   if (!settings.adaptive) return;
-  const budget = isMobile ? 95 : 55;
+  // Budgets are per inference. They are set below the frame interval on
+  // purpose: a depth view that updates 20 times a second reads as continuous,
+  // whereas 10 updates a second reads as stuttering however sharp each one is.
+  const budget = isMobile ? 80 : 45;
 
   if (latencyEma > budget * 1.3 && now - lastAdaptation > 2500) {
     const index = LADDER.indexOf(settings.resolution);

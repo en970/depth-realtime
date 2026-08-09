@@ -48,12 +48,14 @@ export interface ReadyMessage {
 export interface ResultMessage {
   type: "result";
   id: number;
-  /** Normalised depth in [0, 1]; 1 is nearest. */
+  /** Normalised depth quantised to 8 bits; 255 is nearest. */
   buffer: ArrayBuffer;
   width: number;
   height: number;
   /** Wall-clock time of the inference call, in milliseconds. */
   ms: number;
+  /** Preprocessing time (resize, normalise, layout) inside that total. */
+  preprocessMs: number;
 }
 
 export interface ErrorMessage {

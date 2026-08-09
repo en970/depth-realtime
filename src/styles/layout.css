@@ -37,7 +37,6 @@
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent),
     var(--bg-panel);
-  backdrop-filter: blur(var(--blur-glass)) saturate(var(--saturate-glass));
 }
 
 .stage {
