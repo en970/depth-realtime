@@ -14,7 +14,11 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: false
+  # Supersede queued runs rather than draining them in order. There is a single
+  # deployment target, so an older commit finishing after a newer one is never
+  # what is wanted, and a slow runner queue otherwise stacks builds that will
+  # each be overwritten anyway.
+  cancel-in-progress: true
 
 jobs:
   build:
