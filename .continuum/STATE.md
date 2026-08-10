@@ -5,6 +5,19 @@ kenar korumalı yükseltme ve Kalite modu (518 px + tam rehber) yayında değil 
 yerelde çalışıyor. Kalite araştırması (workflow wf_ae9c86ae-7be) hâlâ çalışıyor;
 sonucu gelince yüzey gölgelendirme ve büyük model kararları verilecek.
 
+# Kullanıcının açık şikayetleri (2026-08-11)
+
+1. "arka planı anlamıyor, arkamı siyah yapıyor" — ÇÖZÜLDÜ: uyarlanabilir ton
+   eğrisi (kontrast sınırlı histogram eşitleme) eklendi, "Distance contrast"
+   kaydırıcısı, varsayılan 0.70. Uzak alan detayı +%77.
+2. "FPS çok yavaş" — AÇIK. Ölçülen ~20 fps ama kullanıcının makinesinde daha
+   düşük. Derin araştırma çalışıyor (workflow wf_e8e81111-fb3).
+3. "daha kompakt" — AÇIK. İlk yükleme ~24-55 MB.
+4. "default side by side" — Reset düğmesi eklendi; varsayılan zaten split,
+   kullanıcının localStorage'ında stacked kayıtlıydı.
+
+Repo artık PUBLIC.
+
 # Sıradaki adım
 
 Görev 5: eş derinlik kontur çizgileri. Compose shader'ında, LUT aramasından
@@ -29,6 +42,11 @@ otomatik salınımdan daha güçlü.
   `guide` slider'ı, varsayılan 0.85; sigma URL'den (`sigma=`) ayarlanabilir.
   Ölçüm: edgeAlignment 5.78 -> 6.38 (+%10), fps 11.75 -> 11.4
 - Kalite modu eklendi: 518 px girdi + tam rehber + adaptif kapalı, ~5 fps
+- Uyarlanabilir ton eğrisi eklendi (kontrast sınırlı histogram eşitleme,
+  worker'da kuantalama öncesi, kareler arası EMA 0.05). Uzak alan detayı
+  6.30 -> 11.15 (+%77), yayılım 12.25 -> 22.52 (+%84).
+- quality.mjs'e farGradient ve farSpread metrikleri eklendi: mevcut metrikler
+  yakın özneye baskın olduğu için arka plan sorununu HİÇ göremiyordu.
 - MİMARİ: iki geçişe ayrıldı. Compose geçişi (rehberli yükseltme + kabartma
   gölgeleme + renk) çıkarım başına bir kez, display geçişi her karede sadece
   iki hazır kareyi karıştırıyor. Ölçüm (structure=0.6, iki sahne):
@@ -105,6 +123,10 @@ rawLo/rawHi ve captureChecksum döndürüyor; kararsızlık şüphesinde önce b
 bak.
 
 # Denenip reddedilenler
+
+- Ton histogramında adım (stride 3): maliyeti üçte bire indiriyor ama örneklem
+  gürültüsü doğrudan eğriye giriyor; genel parlaklık kayması neredeyse iki
+  katına çıktı. Her piksel taranıyor.
 
 - Gölgelemeyi alanın kendi çözünürlüğünde (350x196) hesaplayıp ekranda büyütmek:
   fps 21.6 verdi ama gölgelemenin keskinliğini yok etti (highFrequency 34.4 ->
