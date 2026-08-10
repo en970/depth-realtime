@@ -7,14 +7,16 @@ sonucu gelince yüzey gölgelendirme ve büyük model kararları verilecek.
 
 # Sıradaki adım
 
-ÖNCELİK: gölgelemeyi iki geçişe ayır. Şu an Sobel'in 8 tap'i + bilateral'in 75
-tap'i EKRAN çözünürlüğünde çalışıyor ve ölçülen bedel büyük: structure=0.6 ile
-fps 18.55 -> 12.15 (-%34). Araştırmanın önerisi: gölgelemeyi alanın kendi
-çözünürlüğünde (350x196) bir FBO'da hesapla, ekran geçişini sadece büyütmeye
-bırak. Gölgelemenin taşıdığı bilgi alanın çözünürlüğünden ince olamaz, yani bu
-bir kayıp değil. Beklenen: fps'in büyük kısmı geri gelir, mobilde kritik.
+Görev 5: eş derinlik kontur çizgileri. Compose shader'ında, LUT aramasından
+hemen önce; `fract(t * bandCount)` üzerinden `fwidth` ile antialiaslı ince
+çizgi. Açılıp kapanabilir olmalı (View grubunda switch).
 
-Sonra: görev 5 (kontur çizgileri), 6 (salınımlı 3B), 7 (nokta bulutu).
+Sonra görev 6 (salınımlı 3B) ve 7 (nokta bulutu). Salınım için araştırma notu:
+renklendirilmiş derinlik haritasını kaydırmak İŞE YARAMIYOR (dokusu yok);
+parallax ancak KAMERA görüntüsünü derinlikle çarpıtınca güçlü. Backward
+(inverse) warp kullanılırsa disocclusion deliği hiç oluşmuyor, bedeli gizli
+yüzeylerin gerilmesi. Genlik <= %1.5 genişlik, pointer/gyro ile sürülmesi
+otomatik salınımdan daha güçlü.
 
 # Tamamlananlar
 
@@ -27,6 +29,11 @@ Sonra: görev 5 (kontur çizgileri), 6 (salınımlı 3B), 7 (nokta bulutu).
   `guide` slider'ı, varsayılan 0.85; sigma URL'den (`sigma=`) ayarlanabilir.
   Ölçüm: edgeAlignment 5.78 -> 6.38 (+%10), fps 11.75 -> 11.4
 - Kalite modu eklendi: 518 px girdi + tam rehber + adaptif kapalı, ~5 fps
+- MİMARİ: iki geçişe ayrıldı. Compose geçişi (rehberli yükseltme + kabartma
+  gölgeleme + renk) çıkarım başına bir kez, display geçişi her karede sadece
+  iki hazır kareyi karıştırıyor. Ölçüm (structure=0.6, iki sahne):
+  fps 12.15 -> 21.75, highFrequency 34.4 -> 41.0, drift 4.24 -> 2.74.
+  Gölgeleme AÇIKKEN fps, gölgeleme KAPALI taban çizgisinden (18.55) bile yüksek.
 - Gate'li yüzey gölgelemesi (Sobel + half-Lambert, NNW ışık) eklendi:
   edgeAlignment 6.06 -> 7.42 (+%22), highFrequency 22.6 -> 34.4 (+%52),
   drift 6.13 -> 4.24. Bedeli: fps 18.55 -> 12.15
@@ -96,6 +103,22 @@ oturumda kontrolü yerinde değiştirmek gerekir (`localStorage.clear()` +
 slider'a `input` olayı göndererek). `depthDiagnostics()` artık normLo/normHi,
 rawLo/rawHi ve captureChecksum döndürüyor; kararsızlık şüphesinde önce bunlara
 bak.
+
+# Denenip reddedilenler
+
+- Gölgelemeyi alanın kendi çözünürlüğünde (350x196) hesaplayıp ekranda büyütmek:
+  fps 21.6 verdi ama gölgelemenin keskinliğini yok etti (highFrequency 34.4 ->
+  7.3). Gölgeleme, rehberli yükseltmenin ürettiği keskin kenarlardan
+  hesaplanmalı; kazanç çözünürlüğü düşürmekten değil, SIKLIĞI düşürmekten gelir.
+- Gölgeleme terimlerini rehberli değerden (t) hesaplamak: drift %22 iyileşti ama
+  edgeAlignment %8 düştü. Ana hedef kenar hizalaması olduğu için ham örnek
+  korundu.
+- Render hedefi olan dokuyu sampler birimine bağlı bırakmak: geri besleme
+  döngüsü, çizim tanımsız. Pratikte sessizce düz bir kazanç üretti (gölgeleme
+  hiç görünmedi). Compose öncesi ilgili birimler `null`'a bağlanıyor.
+- İki geçiş de aynı vertex aşamasını kullanamaz: compose FBO'ya yazarken v'yi
+  çeviriyor, display tekrar çevirirse görüntü baş aşağı olur. tests/renderer.mjs
+  bunu yakaladı.
 
 # Bilinmesi gerekenler
 

@@ -1,30 +1,52 @@
 /**
  * WebGL2 renderer for the depth map.
  *
- * The network emits a small single-channel field (typically 392x224). Uploading
- * that as an R8 texture and letting the hardware do the bilinear magnification
- * is effectively free, whereas colouring at display resolution on the CPU costs
- * ~10 ms per 1080p frame and would consume the entire frame budget on mobile.
+ * Work is split by how often it actually needs to happen.
  *
- * Two textures are kept. When a new inference result arrives it becomes the
- * target and the previous one stays as the source; the shader interpolates
- * between them over the measured inference interval. Inference at 12 fps
- * therefore still presents as continuous motion at display refresh rate, and
- * the same blend suppresses inter-frame flicker.
+ * The compose pass runs once per inference result. It magnifies the small
+ * single-channel field the network produces, steers that magnification by the
+ * camera image so silhouettes stay sharp, shades relief from the field, and
+ * maps the result through the colour table — writing a finished RGB frame.
+ *
+ * The display pass runs on every animation frame and does one thing: cross-fade
+ * between the last two composed frames. Inference at 12 fps therefore still
+ * presents as continuous motion, and the blend also suppresses inter-frame
+ * flicker. Doing the expensive work here instead measured as a third of the
+ * frame rate, for no visible gain: nothing in it changes between results.
  *
  * WebGL2 rather than WebGPU: the visualisation must also run on iOS 18-25 and
  * Firefox/Linux, where WebGPU is unavailable but WebGL2 is universal (~96%).
  * WebGPU is used for inference only, where it actually matters.
  */
 
+/**
+ * Compose pass vertex stage: flips v.
+ *
+ * Row 0 of the uploaded tensor is the top of the image, but v = 0 is the bottom
+ * of the viewport in clip space, so without this the field would be sampled
+ * upside down.
+ */
 const VERT = `#version 300 es
 in vec2 aPos;
 out vec2 vUv;
 void main() {
-  // Flip v: row 0 of the uploaded tensor is the top of the image, but v = 0 is
-  // the bottom of the viewport in clip space. Without this the depth pane is
-  // upside down relative to the video next to it.
   vUv = vec2(aPos.x, -aPos.y) * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
+
+/**
+ * Display pass vertex stage: does NOT flip.
+ *
+ * The compose pass already wrote the frame the right way up into a texture, and
+ * rendering to a framebuffer puts row 0 at the bottom. Flipping again here
+ * would cancel the first flip out and stand the image on its head — which is
+ * exactly what tests/renderer.mjs caught when both passes shared one stage.
+ */
+const VERT_DISPLAY = `#version 300 es
+in vec2 aPos;
+out vec2 vUv;
+void main() {
+  vUv = aPos * 0.5 + 0.5;
   gl_Position = vec4(aPos, 0.0, 1.0);
 }`;
 
@@ -34,152 +56,130 @@ precision highp float;
 in vec2 vUv;
 out vec4 fragColor;
 
-uniform sampler2D uPrev;
-uniform sampler2D uCurr;
-uniform sampler2D uLut;
-uniform sampler2D uGuide;  // camera frame at full resolution
-uniform float uMix;        // 0 = show uPrev, 1 = show uCurr
-uniform vec2 uCover;       // uv scale that reproduces CSS object-fit: cover
-uniform vec2 uDepthTexel;  // 1 / depth texture size
-uniform float uGuideAmount; // 0 = plain bilinear, 1 = full edge-aware weighting
-uniform float uRangeSigma;  // guide luma difference that halves the weight
-uniform float uStructure;   // 0 = flat ramp, 1 = full relief shading
-uniform vec3 uLight;        // unit vector, light direction
-uniform float uExaggeration; // vertical exaggeration of the surface normal
-uniform float uBase;        // Sobel baseline, in depth texels
-uniform float uNoiseFloor;  // gradient magnitude below which slope is noise
+uniform sampler2D uPrevColor;
+uniform sampler2D uCurrColor;
+uniform float uMix;
 
-float hash(vec2 p) {
+void main() {
+  vec3 previous = texture(uPrevColor, vUv).rgb;
+  vec3 current = texture(uCurrColor, vUv).rgb;
+  fragColor = vec4(mix(previous, current, uMix), 1.0);
+}`;
+
+const COMPOSE_FRAG = `#version 300 es
+precision highp float;
+
+in vec2 vUv;
+out vec4 fragColor;
+
+uniform sampler2D uField;
+uniform sampler2D uGuideTex;
+uniform sampler2D uLutTex;
+uniform vec2 uTexel;
+uniform vec2 uCoverS;
+uniform vec3 uLight;
+uniform float uExaggeration;
+uniform float uBase;
+uniform float uNoiseFloor;
+uniform float uGuideAmountS;
+uniform float uRangeSigmaS;
+uniform float uStructureS;
+
+float hashS(vec2 p) {
   return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
 }
 
-float luma(vec3 c) {
+float lumaS(vec3 c) {
   return dot(c, vec3(0.299, 0.587, 0.114));
 }
 
-float depthAt(vec2 uv) {
-  return mix(texture(uPrev, uv).r, texture(uCurr, uv).r, uMix);
-}
-
 void main() {
-  // The worker already normalises to [0, 1] against smoothed percentile bounds,
-  // so the shader has nothing left to rescale.
-  vec2 uv = clamp((vUv - 0.5) * uCover + 0.5, 0.0, 1.0);
+  vec2 uv = clamp((vUv - 0.5) * uCoverS + 0.5, 0.0, 1.0);
 
+  // Guided upsampling, done here rather than in the display pass. The field is
+  // perhaps 350 px across and the pane three times that, so plain magnification
+  // smears every silhouette; re-weighting the samples by how similar the camera
+  // pixel is at the same place pulls the edge back onto the outline.
   float t;
-  if (uGuideAmount <= 0.001) {
-    t = depthAt(uv);
+  if (uGuideAmountS <= 0.001) {
+    t = texture(uField, uv).r;
   } else {
-    // Cross-bilateral upsampling. The depth field is perhaps 350 px across and
-    // the pane is three times that, so plain bilinear magnification smears each
-    // silhouette over several screen pixels. Re-weighting the depth samples by
-    // how similar the *camera* pixel is at the same place pulls the depth edge
-    // back onto the object outline, because the camera has the resolution the
-    // depth field lacks.
-    float centre = luma(texture(uGuide, uv).rgb);
+    float guideCentre = lumaS(texture(uGuideTex, uv).rgb);
     float sum = 0.0;
     float weightSum = 0.0;
-
-    // 5x5 in depth-texel steps: wide enough to reach across a magnified texel,
-    // small enough to stay one pass.
     for (int y = -2; y <= 2; y++) {
       for (int x = -2; x <= 2; x++) {
-        vec2 offset = vec2(float(x), float(y)) * uDepthTexel;
+        vec2 offset = vec2(float(x), float(y)) * uTexel;
         vec2 sampleUv = clamp(uv + offset, 0.0, 1.0);
-
         float spatial = exp(-float(x * x + y * y) / 4.0);
-        float difference = luma(texture(uGuide, sampleUv).rgb) - centre;
-        float range = exp(-(difference * difference) / (2.0 * uRangeSigma * uRangeSigma));
-
-        float weight = spatial * mix(1.0, range, uGuideAmount);
-        sum += weight * depthAt(sampleUv);
+        float difference = lumaS(texture(uGuideTex, sampleUv).rgb) - guideCentre;
+        float range = exp(-(difference * difference) / (2.0 * uRangeSigmaS * uRangeSigmaS));
+        float weight = spatial * mix(1.0, range, uGuideAmountS);
+        sum += weight * texture(uField, sampleUv).r;
         weightSum += weight;
       }
     }
     t = sum / max(weightSum, 1e-5);
   }
 
-  // Half-LSB dither. The ice ramp is smooth enough that flat walls would
-  // otherwise show visible bands in an 8-bit canvas.
-  t += (hash(gl_FragCoord.xy) - 0.5) / 255.0;
+  // Wide radius: depth darkening (Luft, Colditz and Deussen 2006). Where the
+  // field sits below its own neighbourhood there is a silhouette with a far
+  // side; darkening only that side draws a halo around every object. It
+  // separates two things painted the same shade without needing colour
+  // contrast, and unlike surface shading it holds up at distance because it
+  // keys on a large depth step rather than a small slope.
+  // Measured: deriving these from the guided value instead of a raw sample
+  // trades 8% of edge alignment for 22% less drift. Edge alignment is the
+  // target here, so the raw sample wins.
+  float centre = texture(uField, uv).r;
+  float wide = mix(textureLod(uField, uv, 2.0).r, textureLod(uField, uv, 4.0).r, 0.5);
+  float tight = textureLod(uField, uv, 1.0).r;
 
-  // The table is endpoint-inclusive: entry i holds t = i/255. The continuous
-  // texel index is therefore t*(w-1) + 0.5, not t*w.
-  float lutWidth = float(textureSize(uLut, 0).x);
-  float lutU = (clamp(t, 0.0, 1.0) * (lutWidth - 1.0) + 0.5) / lutWidth;
-  vec3 rgb = texture(uLut, vec2(lutU, 0.5)).rgb;
 
-  if (uStructure > 0.001) {
-    // Relief shading, in two scales, both read from the mip chain so no extra
-    // blur pass is needed.
-    //
-    // Wide radius (Luft, Colditz and Deussen 2006, "depth darkening"): where
-    // the field sits below its own neighbourhood, a silhouette has a far side.
-    // Darkening only that side draws a halo around every object, which
-    // separates two things painted the same shade of blue without needing any
-    // colour contrast — and unlike surface shading it does not fall apart at
-    // distance, because it keys on a large depth step rather than a small
-    // slope.
-    //
-    // Tight radius: the same quantity at one texel, which is curvature.
-    // Hollows darken and ridges lift, so knuckles, folds and a table edge stop
-    // being flat patches of one colour.
-    //
-    // Both are read from uCurr alone. Taking them from the cross-faded value
-    // would draw a moving edge as two half-steps and shade it as a double
-    // ridge.
-    float centre = texture(uCurr, uv).r;
-    float wide = mix(textureLod(uCurr, uv, 2.0).r, textureLod(uCurr, uv, 4.0).r, 0.5);
-    float tight = textureLod(uCurr, uv, 1.0).r;
+  float halo = min(centre - wide, 0.0) * 6.0;
 
-    float halo = min(centre - wide, 0.0) * 6.0;
-    float curvature = centre - tight;
-    float cavity = min(curvature, 0.0) * 8.0 + max(curvature, 0.0) * 4.0;
+  // Tight radius: the same quantity at one texel, which is curvature. Hollows
+  // darken and ridges lift, so knuckles, folds and a table edge stop being flat.
+  float curvature = centre - tight;
+  float cavity = min(curvature, 0.0) * 8.0 + max(curvature, 0.0) * 4.0;
 
-    // Applied as a bounded gain in linear light, never as an overlay blend. The
-    // colour table is the only carrier of the value: lightness order is depth
-    // order, and a full-swing overlay would invert that order across half the
-    // range. At these limits the ordering is uncertain over about 4% of the
-    // range, which is the model's own frame-to-frame noise.
-    // Surface shading: the strongest cue for which way a surface faces, but the
-    // one that degrades worst with distance. A Sobel estimate of the gradient
-    // builds a normal, which a fixed light then shades.
-    //
-    // The gate is not optional. Transport is 8-bit, so the gradient noise floor
-    // is about 4.9e-4 per texel. A nose at arm's length has a slope of 7.4e-3
-    // (comfortably above it), but a wall three metres away has 2.1e-5 — more
-    // than an order of magnitude *below* the floor. Without the gate every
-    // distant flat surface would break into terraces of pure quantisation
-    // noise. More bits would not save it: the problem is that inverse depth
-    // runs out of range at distance, not that the samples are coarse.
-    vec2 tap = uDepthTexel * uBase;
-    float ul = texture(uCurr, uv + vec2(-tap.x, -tap.y)).r;
-    float uc = texture(uCurr, uv + vec2(0.0, -tap.y)).r;
-    float ur = texture(uCurr, uv + vec2(tap.x, -tap.y)).r;
-    float ml = texture(uCurr, uv + vec2(-tap.x, 0.0)).r;
-    float mr = texture(uCurr, uv + vec2(tap.x, 0.0)).r;
-    float dl = texture(uCurr, uv + vec2(-tap.x, tap.y)).r;
-    float dc = texture(uCurr, uv + vec2(0.0, tap.y)).r;
-    float dr = texture(uCurr, uv + vec2(tap.x, tap.y)).r;
+  // Surface shading: a Sobel estimate of the gradient builds a normal, which a
+  // fixed light then shades. The gate below is not optional — see the note on
+  // the noise floor where the uniform is set.
+  vec2 tap = uTexel * uBase;
+  float ul = texture(uField, uv + vec2(-tap.x, -tap.y)).r;
+  float uc = texture(uField, uv + vec2(0.0, -tap.y)).r;
+  float ur = texture(uField, uv + vec2(tap.x, -tap.y)).r;
+  float ml = texture(uField, uv + vec2(-tap.x, 0.0)).r;
+  float mr = texture(uField, uv + vec2(tap.x, 0.0)).r;
+  float dl = texture(uField, uv + vec2(-tap.x, tap.y)).r;
+  float dc = texture(uField, uv + vec2(0.0, tap.y)).r;
+  float dr = texture(uField, uv + vec2(tap.x, tap.y)).r;
 
-    // 1-2-1 weights average three rows, which divides the quantisation noise by
-    // about sqrt(3); the six extra taps are free at this resolution. Dividing by
-    // the baseline keeps the exaggeration meaning the same if it is widened.
-    float gx = ((ur + 2.0 * mr + dr) - (ul + 2.0 * ml + dl)) * 0.125 / uBase;
-    // v grows downward here (the vertex stage flips it), so "up in the image"
-    // is the negative direction and the rows are ordered accordingly.
-    float gy = ((ul + 2.0 * uc + ur) - (dl + 2.0 * dc + dr)) * 0.125 / uBase;
+  // 1-2-1 weights average three rows, dividing quantisation noise by about
+  // sqrt(3). Dividing by the baseline keeps the exaggeration meaning the same
+  // if the baseline is widened.
+  float gx = ((ur + 2.0 * mr + dr) - (ul + 2.0 * ml + dl)) * 0.125 / uBase;
+  float gy = ((ul + 2.0 * uc + ur) - (dl + 2.0 * dc + dr)) * 0.125 / uBase;
 
-    vec3 normal = normalize(vec3(-gx * uExaggeration, -gy * uExaggeration, 1.0));
-    float lambert = dot(normal, uLight);
-    float shade = lambert * 0.5 + 0.5;   // half-Lambert, soft falloff
-    shade *= shade;
+  vec3 normal = normalize(vec3(-gx * uExaggeration, -gy * uExaggeration, 1.0));
+  float shade = dot(normal, uLight) * 0.5 + 0.5;
+  shade *= shade;
 
-    float slope = length(vec2(gx, gy));
-    float trust = smoothstep(uNoiseFloor, 4.0 * uNoiseFloor, slope);
-    float relief = trust * (shade - 0.5) * 0.16;
+  float trust = smoothstep(uNoiseFloor, 4.0 * uNoiseFloor, length(vec2(gx, gy)));
+  float relief = trust * (shade - 0.5) * 0.16;
 
-    float gain = clamp(1.0 + uStructure * (halo + cavity + relief), 0.86, 1.10);
+  // Bounded gain, applied in linear light. Never an overlay blend: the colour
+  // table is the only carrier of the value, and a full-swing overlay would
+  // invert lightness order across half the range.
+  float gain = clamp(1.0 + uStructureS * (halo + cavity + relief), 0.86, 1.10);
+
+  float shaded = t + (hashS(gl_FragCoord.xy) - 0.5) / 255.0;
+  float lutWidth = float(textureSize(uLutTex, 0).x);
+  float lutU = (clamp(shaded, 0.0, 1.0) * (lutWidth - 1.0) + 0.5) / lutWidth;
+  vec3 rgb = texture(uLutTex, vec2(lutU, 0.5)).rgb;
+
+  if (uStructureS > 0.001) {
     vec3 linear = pow(rgb, vec3(2.2)) * gain;
     rgb = pow(max(linear, 0.0), vec3(1.0 / 2.2));
   }
@@ -187,7 +187,7 @@ void main() {
   fragColor = vec4(rgb, 1.0);
 }`;
 
-interface Slot {
+interface Field {
   texture: WebGLTexture;
   width: number;
   height: number;
@@ -195,21 +195,34 @@ interface Slot {
 
 export class DepthRenderer {
   private readonly gl: WebGL2RenderingContext;
-  private readonly program: WebGLProgram;
-  private readonly uniforms: Record<string, WebGLUniformLocation | null>;
-  private readonly lutTexture: WebGLTexture;
-  private prev: Slot;
-  private curr: Slot;
-  private mixStart = 0;
-  private mixDuration = 1;
-  private frames = 0;
-  private dirty = false;
   private readonly canvas: HTMLCanvasElement;
-  private guideTexture!: WebGLTexture;
+
+  private readonly displayProgram: WebGLProgram;
+  private readonly displayUniforms: Record<string, WebGLUniformLocation | null> = {};
+  private readonly composeProgram: WebGLProgram;
+  private readonly composeUniforms: Record<string, WebGLUniformLocation | null> = {};
+
+  /** Raw depth fields as uploaded by the worker. */
+  private field: Field;
+  private previousField: Field;
+
+  /** Finished RGB frames, one per inference result. */
+  private currColor: WebGLTexture;
+  private prevColor: WebGLTexture;
+  private colorWidth = 0;
+  private colorHeight = 0;
+  private framebuffer: WebGLFramebuffer;
+
+  private readonly lutTexture: WebGLTexture;
+  private readonly guideTexture: WebGLTexture;
   private guideSource: HTMLVideoElement | null = null;
+
   private guideAmount = 0;
   private rangeSigma = 0.06;
   private structure = 0;
+  private mixStart = 0;
+  private mixDuration = 1;
+  private frames = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -225,41 +238,91 @@ export class DepthRenderer {
     if (!gl) throw new Error("WebGL2 is not available in this browser.");
     this.gl = gl;
 
-    this.program = link(gl, VERT, FRAG);
-    gl.useProgram(this.program);
+    this.displayProgram = link(gl, VERT_DISPLAY, FRAG);
+    this.composeProgram = link(gl, VERT, COMPOSE_FRAG);
 
     const buffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array([-1, -1, 3, -1, -1, 3]),
-      gl.STATIC_DRAW,
-    );
-    const loc = gl.getAttribLocation(this.program, "aPos");
-    gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
 
-    this.uniforms = {};
-    for (const name of [
-      "uPrev", "uCurr", "uLut", "uGuide", "uMix", "uCover",
-      "uDepthTexel", "uGuideAmount", "uRangeSigma", "uStructure",
-      "uLight", "uExaggeration", "uBase", "uNoiseFloor",
-    ]) {
-      this.uniforms[name] = gl.getUniformLocation(this.program, name);
+    // Both programs read the same full-screen triangle, but the attribute has
+    // to be enabled once per program.
+    for (const program of [this.displayProgram, this.composeProgram]) {
+      gl.useProgram(program);
+      const location = gl.getAttribLocation(program, "aPos");
+      gl.enableVertexAttribArray(location);
+      gl.vertexAttribPointer(location, 2, gl.FLOAT, false, 0, 0);
     }
 
-    this.prev = this.createSlot();
-    this.curr = this.createSlot();
-    this.lutTexture = this.createLutTexture();
-    this.guideTexture = this.createGuideTexture();
+    gl.useProgram(this.displayProgram);
+    for (const name of ["uPrevColor", "uCurrColor", "uMix"]) {
+      this.displayUniforms[name] = gl.getUniformLocation(this.displayProgram, name);
+    }
+    gl.uniform1i(this.displayUniforms.uPrevColor, 5);
+    gl.uniform1i(this.displayUniforms.uCurrColor, 6);
 
-    gl.uniform1i(this.uniforms.uPrev, 0);
-    gl.uniform1i(this.uniforms.uCurr, 1);
-    gl.uniform1i(this.uniforms.uLut, 2);
-    gl.uniform1i(this.uniforms.uGuide, 3);
+    gl.useProgram(this.composeProgram);
+    for (const name of [
+      "uField", "uGuideTex", "uLutTex", "uTexel", "uCoverS", "uLight",
+      "uExaggeration", "uBase", "uNoiseFloor", "uGuideAmountS", "uRangeSigmaS",
+      "uStructureS",
+    ]) {
+      this.composeUniforms[name] = gl.getUniformLocation(this.composeProgram, name);
+    }
+    gl.uniform1i(this.composeUniforms.uField, 1);
+    gl.uniform1i(this.composeUniforms.uLutTex, 2);
+    gl.uniform1i(this.composeUniforms.uGuideTex, 3);
+
+    this.field = this.createField();
+    this.previousField = this.createField();
+    this.lutTexture = this.createLut();
+    this.guideTexture = this.createGuide();
+    this.currColor = this.createColorTarget();
+    this.prevColor = this.createColorTarget();
+    this.framebuffer = gl.createFramebuffer()!;
   }
 
-  private createGuideTexture(): WebGLTexture {
+  private createField(): Field {
+    const gl = this.gl;
+    const texture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    // R8 is filterable everywhere and a quarter of the bandwidth of R16F. R32F
+    // would need OES_texture_float_linear and silently yields an incomplete
+    // texture on several mobile drivers. Mipmapped, because relief shading
+    // reads blurred copies of the field from the mip chain instead of running
+    // a separate blur pass.
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return { texture, width: 1, height: 1 };
+  }
+
+  private createColorTarget(): WebGLTexture {
+    const gl = this.gl;
+    const texture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return texture;
+  }
+
+  private createLut(): WebGLTexture {
+    const gl = this.gl;
+    const texture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return texture;
+  }
+
+  private createGuide(): WebGLTexture {
     const gl = this.gl;
     const texture = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -274,10 +337,19 @@ export class DepthRenderer {
     return texture;
   }
 
+  setColormap(lut: Uint8Array): void {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, 256, 1, 0, gl.RGB, gl.UNSIGNED_BYTE, lut);
+    this.recompose();
+  }
+
   /**
    * Supplies the camera frame used to steer edge-aware upsampling. Uploading
    * straight from the video element avoids the intermediate canvas draw and the
-   * readback that a CPU copy would cost.
+   * readback a CPU copy would cost.
    */
   setGuide(source: HTMLVideoElement | null): void {
     this.guideSource = source;
@@ -286,12 +358,64 @@ export class DepthRenderer {
   setGuideStrength(amount: number, rangeSigma = 0.06): void {
     this.guideAmount = amount;
     this.rangeSigma = Math.max(0.005, rangeSigma);
-    this.dirty = true;
+    this.recompose();
   }
 
   setStructure(amount: number): void {
     this.structure = amount;
-    this.dirty = true;
+    this.recompose();
+  }
+
+  get hasFrame(): boolean {
+    return this.frames > 0;
+  }
+
+  /**
+   * Uploads a new depth field and composes it. `transitionMs` should be the
+   * observed interval between results, so the cross-fade finishes exactly as
+   * the next one arrives.
+   */
+  push(data: Uint8Array, width: number, height: number, transitionMs: number): void {
+    const gl = this.gl;
+    const target = this.previousField;
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, target.texture);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    if (target.width !== width || target.height !== height) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, data);
+      target.width = width;
+      target.height = height;
+    } else {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, data);
+    }
+    gl.generateMipmap(gl.TEXTURE_2D);
+
+    this.previousField = this.field;
+    this.field = target;
+
+    this.uploadGuide();
+
+    // Swap the colour targets first: what was composed last time becomes the
+    // frame being faded out.
+    const outgoing = this.prevColor;
+    this.prevColor = this.currColor;
+    this.currColor = outgoing;
+    this.compose();
+
+    if (this.frames === 0) {
+      // Nothing to fade from on the very first frame; compose into both so the
+      // first displayed image is not a blend with an empty texture.
+      const spare = this.prevColor;
+      this.prevColor = this.currColor;
+      this.currColor = spare;
+      this.compose();
+      this.mixDuration = 1;
+    } else {
+      this.mixDuration = Math.max(16, Math.min(transitionMs, 400));
+    }
+    this.mixStart = performance.now();
+    this.frames++;
   }
 
   private uploadGuide(): void {
@@ -303,100 +427,94 @@ export class DepthRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.guideTexture);
     // No flip: the depth texture is uploaded unflipped too, and the vertex
     // stage already inverts v. Flipping only one of the two would sample the
-    // guide upside down relative to the depth it is steering.
+    // guide upside down relative to the depth it steers.
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);
   }
 
-  private createSlot(): Slot {
-    const gl = this.gl;
-    const texture = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    // R8 is filterable everywhere and a quarter of the bandwidth of R16F. R32F
-    // would need OES_texture_float_linear and silently yields an incomplete
-    // texture on several mobile drivers.
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
-    // Mipmapped: relief shading reads a blurred copy of the field from the mip
-    // chain, which costs one extra fetch instead of a separate blur pass.
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    return { texture, width: 1, height: 1 };
+  /** Re-runs the compose pass for a settings change, between results. */
+  private recompose(): void {
+    if (this.frames === 0) return;
+    this.compose();
   }
 
-  private createLutTexture(): WebGLTexture {
+  private compose(): void {
     const gl = this.gl;
-    const texture = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    return texture;
-  }
+    this.resize();
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    if (width === 0 || height === 0) return;
 
-  setColormap(lut: Uint8Array): void {
-    const gl = this.gl;
+    if (this.colorWidth !== width || this.colorHeight !== height) {
+      for (const texture of [this.currColor, this.prevColor]) {
+        gl.activeTexture(gl.TEXTURE5);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      }
+      this.colorWidth = width;
+      this.colorHeight = height;
+    }
+
+    // The target must not stay bound to a sampler unit while it is the colour
+    // attachment; that is a feedback loop and the draw becomes undefined.
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    gl.framebufferTexture2D(
+      gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.currColor, 0,
+    );
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return;
+    }
+    gl.viewport(0, 0, width, height);
+
+    gl.useProgram(this.composeProgram);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.field.texture);
+    gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, 256, 1, 0, gl.RGB, gl.UNSIGNED_BYTE, lut);
-    this.dirty = true;
-  }
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.guideTexture);
 
-  get hasFrame(): boolean {
-    return this.frames > 0;
-  }
+    // object-fit: cover in uv space. The scale is always <= 1: covering means
+    // sampling a smaller window of the texture, never sampling past its edge.
+    const canvasAspect = width / height;
+    const fieldAspect = this.field.width / this.field.height;
+    const cover: [number, number] =
+      canvasAspect > fieldAspect
+        ? [1, fieldAspect / canvasAspect]
+        : [canvasAspect / fieldAspect, 1];
 
-  /**
-   * Uploads a new depth field. `transitionMs` should be the observed interval
-   * between results so the blend finishes exactly as the next one arrives.
-   */
-  push(data: Uint8Array, width: number, height: number, transitionMs: number): void {
-    const gl = this.gl;
-    const target = this.prev; // the slot not currently displayed becomes the new target
+    gl.uniform2f(this.composeUniforms.uCoverS, cover[0], cover[1]);
+    gl.uniform2f(
+      this.composeUniforms.uTexel,
+      1 / Math.max(1, this.field.width),
+      1 / Math.max(1, this.field.height),
+    );
+    gl.uniform1f(this.composeUniforms.uGuideAmountS, this.guideSource ? this.guideAmount : 0);
+    gl.uniform1f(this.composeUniforms.uRangeSigmaS, this.rangeSigma);
+    gl.uniform1f(this.composeUniforms.uStructureS, this.structure);
+    // Light from the north-north-west at 45 degrees elevation. Above-left is the
+    // cartographic convention for shaded relief; from below, hollows read as
+    // bumps.
+    gl.uniform3f(this.composeUniforms.uLight, -0.2706, 0.6533, 0.7071);
+    gl.uniform1f(this.composeUniforms.uExaggeration, 14);
+    gl.uniform1f(this.composeUniforms.uBase, 1.5);
+    // 8-bit transport puts gradient noise near 4.9e-4 per texel, scaled by the
+    // baseline. Below that there is no slope to shade, only quantisation.
+    gl.uniform1f(this.composeUniforms.uNoiseFloor, 4.9e-4 / 1.5);
 
-    gl.bindTexture(gl.TEXTURE_2D, target.texture);
-    // Row alignment must be 1: single-channel rows are rarely a multiple of 4
-    // (a 350 px wide field is not), and the default of 4 would shear the image.
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    if (target.width !== width || target.height !== height) {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, data);
-      target.width = width;
-      target.height = height;
-    } else {
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, data);
-    }
-
-    gl.generateMipmap(gl.TEXTURE_2D);
-
-    // Swap: the freshly written slot becomes `curr`, the previously shown one
-    // becomes `prev` and is blended out.
-    this.prev = this.curr;
-    this.curr = target;
-
-    if (this.frames === 0) {
-      // Seed the other slot with the same field. Writing only its metadata
-      // would leave a 1x1 texture behind a 392x224 descriptor, and the next
-      // texSubImage2D would fail with an offset overflow.
-      const other = this.prev;
-      gl.bindTexture(gl.TEXTURE_2D, other.texture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, data);
-      gl.generateMipmap(gl.TEXTURE_2D);
-      other.width = width;
-      other.height = height;
-      this.mixDuration = 1;
-    } else {
-      this.mixDuration = Math.max(16, Math.min(transitionMs, 400));
-    }
-    this.mixStart = performance.now();
-    this.frames++;
-    this.dirty = true;
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
   /** Matches the drawing buffer to the CSS box. Capped at 1.5x device pixels:
-   *  the depth field is magnified from roughly 350 px across, so denser
-   *  sampling buys nothing while costing fragments linearly. */
-  resize(): boolean {
+   *  the field is magnified from roughly 350 px across, so denser sampling buys
+   *  nothing while costing fragments linearly. */
+  private resize(): boolean {
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     const width = Math.max(1, Math.round(this.canvas.clientWidth * dpr));
     const height = Math.max(1, Math.round(this.canvas.clientHeight * dpr));
@@ -410,63 +528,22 @@ export class DepthRenderer {
     if (this.frames === 0) return;
     const gl = this.gl;
 
+    // A resize invalidates both composed frames, so rebuild them before drawing.
+    if (this.canvas.clientWidth * Math.min(window.devicePixelRatio || 1, 1.5) !== this.colorWidth) {
+      this.compose();
+    }
+
     // performance.now() and the animation-frame timestamp are not the same
     // clock; measured, 11-18% of pushes see a difference of up to -1.1 ms.
     const mix = Math.min(1, Math.max(0, (now - this.mixStart) / this.mixDuration));
-    const resized = this.resize();
-
-    // The image is static between inference results, so redrawing at display
-    // refresh rate burns a full-screen fragment pass for an identical frame.
-    // With a live guide the camera keeps moving underneath, so the guided pass
-    // has to keep up with it.
-    const guided = this.guideAmount > 0.001 && this.guideSource !== null;
-    if (!guided && !resized && !this.dirty && mix >= 1) return;
-    if (mix >= 1) this.dirty = false;
 
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-
-    // object-fit: cover, computed in uv space so the depth pane frames exactly
-    // the same region as the video element next to it.
-    // object-fit: cover in uv space. The scale is always <= 1: covering means
-    // sampling a *smaller* window of the texture, never sampling past its edge.
-    // Getting this backwards magnifies the centre and smears the clamped border.
-    const canvasAspect = this.canvas.width / this.canvas.height;
-    const texAspect = this.curr.width / this.curr.height;
-    const cover: [number, number] =
-      canvasAspect > texAspect
-        ? [1, texAspect / canvasAspect]
-        : [canvasAspect / texAspect, 1];
-
-    gl.useProgram(this.program);
-    this.uploadGuide();
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.prev.texture);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.curr.texture);
-    gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
-    gl.activeTexture(gl.TEXTURE3);
-    gl.bindTexture(gl.TEXTURE_2D, this.guideTexture);
-
-    gl.uniform1f(this.uniforms.uMix, mix);
-    gl.uniform2f(this.uniforms.uCover, cover[0], cover[1]);
-    gl.uniform2f(
-      this.uniforms.uDepthTexel,
-      1 / Math.max(1, this.curr.width),
-      1 / Math.max(1, this.curr.height),
-    );
-    gl.uniform1f(this.uniforms.uGuideAmount, guided ? this.guideAmount : 0);
-    gl.uniform1f(this.uniforms.uRangeSigma, this.rangeSigma);
-    gl.uniform1f(this.uniforms.uStructure, this.structure);
-    // Light from the north-north-west at 45 degrees elevation. Lighting from
-    // above-left is the cartographic convention for shaded relief; lighting from
-    // below inverts the reading and hollows look like bumps.
-    gl.uniform3f(this.uniforms.uLight, -0.2706, 0.6533, 0.7071);
-    gl.uniform1f(this.uniforms.uExaggeration, 14);
-    gl.uniform1f(this.uniforms.uBase, 1.5);
-    // 8-bit transport: 4.9e-4 per texel, scaled by the baseline.
-    gl.uniform1f(this.uniforms.uNoiseFloor, 4.9e-4 / 1.5);
-
+    gl.useProgram(this.displayProgram);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, this.prevColor);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, this.currColor);
+    gl.uniform1f(this.displayUniforms.uMix, mix);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 }
