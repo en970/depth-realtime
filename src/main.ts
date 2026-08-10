@@ -274,6 +274,11 @@ let lastResultAt = 0;
 let interval = 100;
 let latencyEma = 0;
 let preprocessEma = 0;
+let normLo = 0;
+let normHi = 1;
+let rawLo = 0;
+let rawHi = 1;
+let lastCaptureChecksum = 0;
 let fpsEma = 0;
 let lastAdaptation = 0;
 
@@ -320,6 +325,11 @@ function handleWorkerError(event: ErrorEvent): void {
   latencyEma,
   fpsEma,
   preprocessEma,
+  normLo,
+  normHi,
+  rawLo,
+  rawHi,
+  captureChecksum: lastCaptureChecksum,
   videoReady: video.readyState,
   videoSize: [video.videoWidth, video.videoHeight],
 });
@@ -392,6 +402,10 @@ function handleWorkerMessage(event: MessageEvent<FromWorker>): void {
           : preprocessEma * 0.8 + message.preprocessMs * 0.2;
 
       renderer.push(new Uint8Array(message.buffer), message.width, message.height, interval);
+      normLo = message.lo;
+      normHi = message.hi;
+      rawLo = message.rawLo;
+      rawHi = message.rawHi;
       metaDepth.textContent = `${message.width}x${message.height}`;
       infoOutput.textContent = `${message.width}x${message.height}`;
       adapt(now);
@@ -490,6 +504,12 @@ function captureFrame(): void {
   }
   captureCtx.drawImage(video, 0, 0, width, height);
   const image = captureCtx.getImageData(0, 0, width, height);
+
+  // Diagnostic only: a cheap fingerprint of the captured frame, so a drifting
+  // model output can be told apart from a drifting input.
+  let checksum = 0;
+  for (let i = 0; i < image.data.length; i += 997) checksum += image.data[i];
+  lastCaptureChecksum = checksum;
 
   inFlight = true;
   frameId++;

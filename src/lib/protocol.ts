@@ -56,6 +56,12 @@ export interface ResultMessage {
   ms: number;
   /** Preprocessing time (resize, normalise, layout) inside that total. */
   preprocessMs: number;
+  /** Smoothed normalisation bounds actually used for this frame. */
+  lo: number;
+  hi: number;
+  /** The same bounds before smoothing, for stability diagnosis. */
+  rawLo: number;
+  rawHi: number;
 }
 
 export interface ErrorMessage {

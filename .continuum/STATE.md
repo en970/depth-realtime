@@ -7,18 +7,14 @@ sonucu gelince yüzey gölgelendirme ve büyük model kararları verilecek.
 
 # Sıradaki adım
 
-Görev 5: eş derinlik kontur çizgileri (açılıp kapanabilir). Ardından görev 6
-(salınımlı 3B) ve 7 (nokta bulutu).
+ÖNCELİK: gölgelemeyi iki geçişe ayır. Şu an Sobel'in 8 tap'i + bilateral'in 75
+tap'i EKRAN çözünürlüğünde çalışıyor ve ölçülen bedel büyük: structure=0.6 ile
+fps 18.55 -> 12.15 (-%34). Araştırmanın önerisi: gölgelemeyi alanın kendi
+çözünürlüğünde (350x196) bir FBO'da hesapla, ekran geçişini sadece büyütmeye
+bırak. Gölgelemenin taşıdığı bilgi alanın çözünürlüğünden ince olamaz, yani bu
+bir kayıp değil. Beklenen: fps'in büyük kısmı geri gelir, mobilde kritik.
 
-Araştırmanın önerdiği ve HENÜZ YAPILMAYAN iki şey:
-1. Gate'li hillshade (Sobel + half-Lambert, NNW ışık vec3(-0.2706, 0.6533,
-   0.7071), uExag 5-25). Depth darkening'in üstüne yüzey yönü hissi ekler.
-   ZORUNLU: gradyan gürültü tabanına göre `smoothstep(uFloor, 4*uFloor, |grad|)`
-   gate'i — onsuz uzak duvarlar teras teras olur (ölçülmüş: 3 m'deki duvarın
-   eğimi gürültü tabanının 24 katı ALTINDA).
-2. Gölgelemeyi 350x196'lık bir FBO'da hesaplayıp ekran geçişini sadece
-   büyütmeye bırakmak. Gölgelemenin taşıdığı bilgi alanın çözünürlüğünden ince
-   olamaz; şu an ekran çözünürlüğünde hesaplanıyor (zayıf Android GPU'da ~2 ms).
+Sonra: görev 5 (kontur çizgileri), 6 (salınımlı 3B), 7 (nokta bulutu).
 
 # Tamamlananlar
 
@@ -31,6 +27,9 @@ Araştırmanın önerdiği ve HENÜZ YAPILMAYAN iki şey:
   `guide` slider'ı, varsayılan 0.85; sigma URL'den (`sigma=`) ayarlanabilir.
   Ölçüm: edgeAlignment 5.78 -> 6.38 (+%10), fps 11.75 -> 11.4
 - Kalite modu eklendi: 518 px girdi + tam rehber + adaptif kapalı, ~5 fps
+- Gate'li yüzey gölgelemesi (Sobel + half-Lambert, NNW ışık) eklendi:
+  edgeAlignment 6.06 -> 7.42 (+%22), highFrequency 22.6 -> 34.4 (+%52),
+  drift 6.13 -> 4.24. Bedeli: fps 18.55 -> 12.15
 - Kabartma gölgelemesi (depth darkening + cavity) eklendi: mip zincirinden
   okunuyor, ayrı blur geçişi yok. Ölçüm: edgeAlignment 4.32 -> 5.97 (+%38),
   highFrequency 24.9 -> 45.4 (+%82), drift 8.78 -> 5.44. Görsel fark büyük:
@@ -85,6 +84,18 @@ bir alan gözde bulanık algılanır.
   en az 2 sahne gerekir.
 - Ölçüm gürültüsü ayarlara göre değişiyor: spread %4 ile %141 arasında. Küçük
   farklar (<%10) tek koşuyla değerlendirilemez.
+
+# Ölçüm düzeneğinin sınırı (önemli)
+
+Chrome'un `--use-file-for-fake-video-capture` ile beslediği tek kareli y4m
+GERÇEKTEN sabit değil: yakalanan karenin parmak izi bir koşu içinde %1.3
+kayıyor (50895 -> 51594, monoton). Bunun sonucu zincirleme:
+ham p2/p98 sınırları %4-24 oynuyor -> normalize çıktı kayıyor -> ölçüm gürültüsü.
+Bu yüzden FARKLI KOŞULAR ARASINDA görsel karşılaştırma yapılamaz; A/B için tek
+oturumda kontrolü yerinde değiştirmek gerekir (`localStorage.clear()` +
+slider'a `input` olayı göndererek). `depthDiagnostics()` artık normLo/normHi,
+rawLo/rawHi ve captureChecksum döndürüyor; kararsızlık şüphesinde önce bunlara
+bak.
 
 # Bilinmesi gerekenler
 

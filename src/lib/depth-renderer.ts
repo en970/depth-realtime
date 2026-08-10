@@ -44,6 +44,10 @@ uniform vec2 uDepthTexel;  // 1 / depth texture size
 uniform float uGuideAmount; // 0 = plain bilinear, 1 = full edge-aware weighting
 uniform float uRangeSigma;  // guide luma difference that halves the weight
 uniform float uStructure;   // 0 = flat ramp, 1 = full relief shading
+uniform vec3 uLight;        // unit vector, light direction
+uniform float uExaggeration; // vertical exaggeration of the surface normal
+uniform float uBase;        // Sobel baseline, in depth texels
+uniform float uNoiseFloor;  // gradient magnitude below which slope is noise
 
 float hash(vec2 p) {
   return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
@@ -137,7 +141,45 @@ void main() {
     // order, and a full-swing overlay would invert that order across half the
     // range. At these limits the ordering is uncertain over about 4% of the
     // range, which is the model's own frame-to-frame noise.
-    float gain = clamp(1.0 + uStructure * (halo + cavity), 0.86, 1.10);
+    // Surface shading: the strongest cue for which way a surface faces, but the
+    // one that degrades worst with distance. A Sobel estimate of the gradient
+    // builds a normal, which a fixed light then shades.
+    //
+    // The gate is not optional. Transport is 8-bit, so the gradient noise floor
+    // is about 4.9e-4 per texel. A nose at arm's length has a slope of 7.4e-3
+    // (comfortably above it), but a wall three metres away has 2.1e-5 — more
+    // than an order of magnitude *below* the floor. Without the gate every
+    // distant flat surface would break into terraces of pure quantisation
+    // noise. More bits would not save it: the problem is that inverse depth
+    // runs out of range at distance, not that the samples are coarse.
+    vec2 tap = uDepthTexel * uBase;
+    float ul = texture(uCurr, uv + vec2(-tap.x, -tap.y)).r;
+    float uc = texture(uCurr, uv + vec2(0.0, -tap.y)).r;
+    float ur = texture(uCurr, uv + vec2(tap.x, -tap.y)).r;
+    float ml = texture(uCurr, uv + vec2(-tap.x, 0.0)).r;
+    float mr = texture(uCurr, uv + vec2(tap.x, 0.0)).r;
+    float dl = texture(uCurr, uv + vec2(-tap.x, tap.y)).r;
+    float dc = texture(uCurr, uv + vec2(0.0, tap.y)).r;
+    float dr = texture(uCurr, uv + vec2(tap.x, tap.y)).r;
+
+    // 1-2-1 weights average three rows, which divides the quantisation noise by
+    // about sqrt(3); the six extra taps are free at this resolution. Dividing by
+    // the baseline keeps the exaggeration meaning the same if it is widened.
+    float gx = ((ur + 2.0 * mr + dr) - (ul + 2.0 * ml + dl)) * 0.125 / uBase;
+    // v grows downward here (the vertex stage flips it), so "up in the image"
+    // is the negative direction and the rows are ordered accordingly.
+    float gy = ((ul + 2.0 * uc + ur) - (dl + 2.0 * dc + dr)) * 0.125 / uBase;
+
+    vec3 normal = normalize(vec3(-gx * uExaggeration, -gy * uExaggeration, 1.0));
+    float lambert = dot(normal, uLight);
+    float shade = lambert * 0.5 + 0.5;   // half-Lambert, soft falloff
+    shade *= shade;
+
+    float slope = length(vec2(gx, gy));
+    float trust = smoothstep(uNoiseFloor, 4.0 * uNoiseFloor, slope);
+    float relief = trust * (shade - 0.5) * 0.16;
+
+    float gain = clamp(1.0 + uStructure * (halo + cavity + relief), 0.86, 1.10);
     vec3 linear = pow(rgb, vec3(2.2)) * gain;
     rgb = pow(max(linear, 0.0), vec3(1.0 / 2.2));
   }
@@ -201,6 +243,7 @@ export class DepthRenderer {
     for (const name of [
       "uPrev", "uCurr", "uLut", "uGuide", "uMix", "uCover",
       "uDepthTexel", "uGuideAmount", "uRangeSigma", "uStructure",
+      "uLight", "uExaggeration", "uBase", "uNoiseFloor",
     ]) {
       this.uniforms[name] = gl.getUniformLocation(this.program, name);
     }
@@ -415,6 +458,14 @@ export class DepthRenderer {
     gl.uniform1f(this.uniforms.uGuideAmount, guided ? this.guideAmount : 0);
     gl.uniform1f(this.uniforms.uRangeSigma, this.rangeSigma);
     gl.uniform1f(this.uniforms.uStructure, this.structure);
+    // Light from the north-north-west at 45 degrees elevation. Lighting from
+    // above-left is the cartographic convention for shaded relief; lighting from
+    // below inverts the reading and hollows look like bumps.
+    gl.uniform3f(this.uniforms.uLight, -0.2706, 0.6533, 0.7071);
+    gl.uniform1f(this.uniforms.uExaggeration, 14);
+    gl.uniform1f(this.uniforms.uBase, 1.5);
+    // 8-bit transport: 4.9e-4 per texel, scaled by the baseline.
+    gl.uniform1f(this.uniforms.uNoiseFloor, 4.9e-4 / 1.5);
 
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }

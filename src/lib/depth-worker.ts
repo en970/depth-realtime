@@ -252,10 +252,17 @@ function computeBounds(data: Float32Array): [number, number] {
   return [min + lowBin / scale, min + highBin / scale];
 }
 
+/** Last raw percentile bounds, before smoothing. Reported so the stability of
+ *  the model output can be told apart from the stability of the smoothing. */
+let rawLo = 0;
+let rawHi = 1;
+
 /** Normalises into [0, 1] and applies the per-pixel exponential average. The
  *  smoothing state stays in float; only the transported copy is quantised. */
 function normalise(data: Float32Array): Float32Array {
   const [lo, hi] = computeBounds(data);
+  rawLo = lo;
+  rawHi = hi;
 
   if (emaLo === null || emaHi === null) {
     emaLo = lo;
@@ -345,6 +352,10 @@ async function handleFrame(
         height: outHeight,
         ms,
         preprocessMs,
+        lo: emaLo ?? 0,
+        hi: emaHi ?? 1,
+        rawLo,
+        rawHi,
       },
       [copy.buffer],
     );
