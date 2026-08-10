@@ -20,6 +20,11 @@
  *                  noise, so it is only meaningful read together with the two
  *                  others.
  *
+ *   farGradient    Mean depth-gradient magnitude over the far half of the
+ *                  scene, and farSpread its standard deviation. The other
+ *                  metrics are dominated by the near subject; these are the
+ *                  ones that answer "is the background just a black mass".
+ *
  *   temporalDrift  Mean absolute change per pixel between consecutive reads of
  *                  a *static* scene. Input is frozen, so anything non-zero is
  *                  flicker introduced by the pipeline. Detail improvements must
@@ -118,6 +123,7 @@ async function measureScene(scene) {
     result[key] = typeof values[0] === "number" ? median(values) : values[0];
   }
   result.spreadEdgeAlignment = spread(readings.map((r) => r.edgeAlignment));
+  result.spreadFarGradient = spread(readings.map((r) => r.farGradient));
   result.spreadHighFrequency = spread(readings.map((r) => r.highFrequency));
 
   await context.close();
@@ -253,6 +259,27 @@ async function readOnce(page) {
         if (depthA[i] > depthMax) depthMax = depthA[i];
       }
 
+      // Detail in the far half of the scene, which the other metrics miss
+      // entirely: they are dominated by the near subject, where contrast was
+      // never the problem. Inverse depth compresses everything distant into a
+      // few levels, so this is where "the background is just black" shows up.
+      const sortedDepth = Float32Array.from(depthA).sort();
+      const median = sortedDepth[sortedDepth.length >> 1];
+      let farGradient = 0;
+      let farCount = 0;
+      let farSum = 0;
+      let farSumSq = 0;
+      for (let i = 0; i < depthA.length; i++) {
+        if (depthA[i] <= median) {
+          farGradient += depthGrad[i];
+          farSum += depthA[i];
+          farSumSq += depthA[i] * depthA[i];
+          farCount++;
+        }
+      }
+      const farMean = farCount ? farSum / farCount : 0;
+      const farVariance = farCount ? farSumSq / farCount - farMean * farMean : 0;
+
       return {
         edgeAlignment: flatMean > 0.001 ? edgeMean / flatMean : 0,
         edgeGradient: edgeMean,
@@ -265,6 +292,8 @@ async function readOnce(page) {
         driftLongShift: longTerm.shift,
         driftLongResidual: longTerm.residual,
         dynamicRange: depthMax - depthMin,
+        farGradient: farCount ? farGradient / farCount : 0,
+        farSpread: Math.sqrt(Math.max(0, farVariance)),
         fps: Number(document.getElementById("stat-fps").textContent),
         inferenceMs: Number(document.getElementById("stat-latency").textContent),
         output: document.getElementById("info-output").textContent,
@@ -283,6 +312,8 @@ for (const scene of SCENES) {
   console.log(
     `edgeAlignment=${metrics.edgeAlignment.toFixed(3)} ` +
       `highFreq=${metrics.highFrequency.toFixed(1)} ` +
+      `farGrad=${metrics.farGradient.toFixed(2)} ` +
+      `farSpread=${metrics.farSpread.toFixed(1)} ` +
       `drift=${metrics.temporalDrift.toFixed(2)} ` +
       `(shift ${metrics.driftLongShift.toFixed(2)} / resid ${metrics.driftLongResidual.toFixed(2)}) ` +
       `frame=${metrics.driftShort.toFixed(2)} ` +
@@ -295,6 +326,10 @@ const keys = Object.keys(record.scenes);
 record.mean = {
   edgeAlignment:
     keys.reduce((a, k) => a + record.scenes[k].edgeAlignment, 0) / keys.length,
+  farGradient:
+    keys.reduce((a, k) => a + record.scenes[k].farGradient, 0) / keys.length,
+  farSpread:
+    keys.reduce((a, k) => a + record.scenes[k].farSpread, 0) / keys.length,
   highFrequency:
     keys.reduce((a, k) => a + record.scenes[k].highFrequency, 0) / keys.length,
   temporalDrift:

@@ -37,6 +37,22 @@ const HIST_BINS = 1024;
 const EMA_EXPAND = 0.35;
 const EMA_CONTRACT = 0.08;
 
+/** Tone curve resolution. */
+const TONE_BINS = 256;
+/**
+ * Contrast limit for the adaptive tone curve, as a multiple of the flat
+ * histogram. Unlimited equalisation would stretch whatever is most common —
+ * often a flat wall — until its quantisation noise became visible structure.
+ */
+const TONE_CLIP = 3.0;
+/** How fast the curve follows the scene. Slow enough that walking across the
+ *  room does not make the whole image pulse. */
+const TONE_EMA = 0.05;
+/** Histogram stride. Sampling fewer pixels is cheaper but noisier, and the
+ *  noise lands directly in the curve: measured at stride 3 the whole-image
+ *  brightness drift nearly doubled. Every pixel it is. */
+const TONE_STRIDE = 1;
+
 /** A hung WebGPU submission cannot be cancelled, but it can be raced against a
  *  timer so the app falls back instead of showing a permanently empty pane.
  *  WASM gets far longer: its first call also downloads and compiles the ONNX
@@ -93,6 +109,10 @@ let emaLo: number | null = null;
 let emaHi: number | null = null;
 let smoothed: Float32Array | null = null;
 let histogram = new Uint32Array(HIST_BINS);
+let toneHistogram = new Uint32Array(TONE_BINS);
+let toneCurve: Float32Array | null = null;
+let toneStrength = 0;
+let scratch: Float32Array | null = null;
 let busy = false;
 let queue: Candidate[] = [];
 
@@ -273,31 +293,102 @@ function normalise(data: Float32Array): Float32Array {
   }
   const span = Math.max(emaHi - emaLo, 1e-6);
 
-  if (!smoothed || smoothed.length !== data.length) {
-    smoothed = new Float32Array(data.length);
-    for (let i = 0; i < data.length; i++) {
-      smoothed[i] = clamp01((data[i] - emaLo) / span);
+  const fresh = !smoothed || smoothed.length !== data.length;
+  if (fresh) smoothed = new Float32Array(data.length);
+  const out = smoothed!;
+
+  // Linear pass first: the tone curve has to be built from normalised values.
+  const linear = scratch && scratch.length === data.length ? scratch : new Float32Array(data.length);
+  scratch = linear;
+  for (let i = 0; i < data.length; i++) {
+    linear[i] = clamp01((data[i] - emaLo) / span);
+  }
+
+  if (toneStrength > 0.001) {
+    updateToneCurve(linear);
+    for (let i = 0; i < linear.length; i++) {
+      // Blended rather than switched: at full strength the curve can flatten
+      // the foreground it is trying to keep, and the mix lets that be traded.
+      linear[i] += toneStrength * (applyToneCurve(linear[i]) - linear[i]);
     }
-    return smoothed;
+  }
+
+  if (fresh) {
+    out.set(linear);
+    return out;
   }
 
   const a = smoothing;
   if (a <= 0.001) {
-    for (let i = 0; i < data.length; i++) {
-      smoothed[i] = clamp01((data[i] - emaLo) / span);
-    }
+    out.set(linear);
   } else {
     const b = 1 - a;
-    for (let i = 0; i < data.length; i++) {
-      const t = clamp01((data[i] - emaLo) / span);
-      smoothed[i] = smoothed[i] * a + t * b;
+    for (let i = 0; i < out.length; i++) {
+      out[i] = out[i] * a + linear[i] * b;
     }
   }
-  return smoothed;
+  return out;
 }
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/**
+ * Builds a contrast-limited equalisation curve for the current frame.
+ *
+ * The network emits inverse depth, so value is proportional to 1/distance. A
+ * person at half a metre and a wall at three metres differ by a factor of six,
+ * which means everything beyond a couple of metres lands in the last few
+ * percent of the range — a flat dark mass with no visible structure, however
+ * much detail the model actually recovered. Linear scaling cannot fix that,
+ * because the problem is the shape of the distribution rather than its tails.
+ *
+ * Equalising against the scene's own histogram spends output range where the
+ * data actually is. The clip keeps it honest: without it, a large flat surface
+ * would dominate the histogram and get stretched until its quantisation noise
+ * looked like texture.
+ */
+function updateToneCurve(values: Float32Array): void {
+  toneHistogram.fill(0);
+  const scale = TONE_BINS - 1;
+  let counted = 0;
+  for (let i = 0; i < values.length; i += TONE_STRIDE) {
+    toneHistogram[(values[i] * scale) | 0]++;
+    counted++;
+  }
+
+  // Clip tall bins and hand the excess back evenly, so no single surface can
+  // claim an unbounded share of the output range.
+  const limit = (counted / TONE_BINS) * TONE_CLIP;
+  let excess = 0;
+  for (let b = 0; b < TONE_BINS; b++) {
+    if (toneHistogram[b] > limit) {
+      excess += toneHistogram[b] - limit;
+      toneHistogram[b] = limit;
+    }
+  }
+  const share = excess / TONE_BINS;
+
+  let cumulative = 0;
+  const total = counted;
+  const target = toneCurve ?? new Float32Array(TONE_BINS);
+  const fresh = toneCurve === null;
+  for (let b = 0; b < TONE_BINS; b++) {
+    cumulative += toneHistogram[b] + share;
+    const mapped = cumulative / total;
+    target[b] = fresh ? mapped : target[b] + TONE_EMA * (mapped - target[b]);
+  }
+  toneCurve = target;
+}
+
+/** Samples the tone curve with linear interpolation between bins. */
+function applyToneCurve(t: number): number {
+  const curve = toneCurve!;
+  const x = t * (TONE_BINS - 1);
+  const i = Math.min(TONE_BINS - 2, x | 0);
+  const f = x - i;
+  return curve[i] + (curve[i + 1] - curve[i]) * f;
 }
 
 async function handleFrame(
@@ -455,6 +546,8 @@ function resetTemporalState(): void {
   emaLo = null;
   emaHi = null;
   smoothed = null;
+  scratch = null;
+  toneCurve = null;
 }
 
 self.onmessage = async (event: MessageEvent<ToWorker>) => {
@@ -463,6 +556,7 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
   if (message.type === "init") {
     resolution = message.resolution;
     smoothing = message.smoothing;
+    toneStrength = message.tone ?? 0;
     mobile = message.mobile;
     post({ type: "status", stage: "starting" });
     queue = await candidates(message.force);
@@ -480,6 +574,7 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
 
   if (message.type === "config") {
     if (typeof message.smoothing === "number") smoothing = message.smoothing;
+    if (typeof message.tone === "number") toneStrength = message.tone;
     if (typeof message.resolution === "number" && message.resolution !== resolution) {
       // The page decides the framing; the worker only needs to drop its
       // temporal state, whose buffers are sized to the previous field.

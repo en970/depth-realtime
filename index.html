@@ -121,6 +121,27 @@
         <section class="group">
           <h2 class="group__title">View</h2>
           <div class="field">
+            <label class="field__label" for="tone-range">
+              Distance contrast
+              <span class="field__value" id="tone-value">0.70</span>
+            </label>
+            <input
+              class="range"
+              id="tone-range"
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value="0.7"
+            />
+            <p class="field__hint">
+              The network reports inverse depth, so everything past a couple of
+              metres compresses into the darkest few percent of the scale. This
+              redistributes the range across the depths the scene actually
+              contains, which is what makes the background readable.
+            </p>
+          </div>
+          <div class="field">
             <label class="field__label" for="structure-range">
               Relief shading
               <span class="field__value" id="structure-value">0.60</span>
@@ -269,6 +290,9 @@
             scale, <span class="kbd">←</span> <span class="kbd">→</span> comparison
             position.
           </p>
+          <button class="btn btn--block" id="reset-settings" type="button">
+            Reset to defaults
+          </button>
           <p class="footnote">
             Depth is relative and affine-invariant, not metric. Identical
             brightness in two different frames does not imply identical distance.

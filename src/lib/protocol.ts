@@ -10,6 +10,8 @@ export interface InitMessage {
   /** Mobile devices default to smaller weights: 19 MB instead of 50 MB. */
   mobile: boolean;
   smoothing: number;
+  /** Adaptive tone curve strength, 0 to 1. */
+  tone?: number;
   /** Diagnostic override, set through the `backend` URL parameter. */
   force?: "webgpu" | "wasm";
 }
@@ -26,6 +28,7 @@ export interface ConfigMessage {
   type: "config";
   resolution?: number;
   smoothing?: number;
+  tone?: number;
 }
 
 export type ToWorker = InitMessage | FrameMessage | ConfigMessage;

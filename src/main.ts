@@ -55,10 +55,13 @@ const guideRange = $<HTMLInputElement>("guide-range");
 const guideValue = $<HTMLElement>("guide-value");
 const structureRange = $<HTMLInputElement>("structure-range");
 const structureValue = $<HTMLElement>("structure-value");
+const toneRange = $<HTMLInputElement>("tone-range");
+const toneValue = $<HTMLElement>("tone-value");
 const compareInput = $<HTMLInputElement>("compare-input");
 const infoBackend = $<HTMLElement>("info-backend");
 const infoDtype = $<HTMLElement>("info-dtype");
 const infoOutput = $<HTMLElement>("info-output");
+const resetButton = $<HTMLButtonElement>("reset-settings");
 
 /* -------------------------------------------------------------------------- */
 /* State                                                                       */
@@ -79,6 +82,8 @@ interface Settings {
   guideSigma: number;
   /** Relief shading strength: depth darkening plus curvature. */
   structure: number;
+  /** Adaptive tone curve strength: opens up distant, compressed depths. */
+  tone: number;
   quality: boolean;
 }
 
@@ -96,6 +101,7 @@ const defaults: Settings = {
   guide: 0.85,
   guideSigma: 0.06,
   structure: 0.6,
+  tone: 0.7,
   quality: false,
 };
 
@@ -144,6 +150,9 @@ function readSettings(): Partial<Settings> {
   const structure = pickNumber("structure", 0, 1);
   if (structure !== null) out.structure = structure;
 
+  const tone = pickNumber("tone", 0, 1);
+  if (tone !== null) out.tone = tone;
+
   // Advanced, URL only: how different the camera pixel has to be before a depth
   // sample stops counting. Exposed for tuning runs rather than for the panel.
   const sigma = pickNumber("sigma", 0.005, 0.5);
@@ -173,6 +182,7 @@ function persistSettings(): void {
       split: settings.split.toFixed(0),
       guide: settings.guide.toFixed(2),
       structure: settings.structure.toFixed(2),
+      tone: settings.tone.toFixed(2),
       mirror: settings.mirror ? "1" : "0",
       adaptive: settings.adaptive ? "1" : "0",
       quality: settings.quality ? "1" : "0",
@@ -670,6 +680,15 @@ function applyQuality(enabled: boolean): void {
   persistSettings();
 }
 
+function applyTone(value: number): void {
+  settings.tone = value;
+  toneRange.value = String(value);
+  toneValue.textContent = value.toFixed(2);
+  setRangeFill(toneRange);
+  send({ type: "config", tone: value });
+  persistSettings();
+}
+
 function applyStructure(value: number): void {
   settings.structure = value;
   structureRange.value = String(value);
@@ -829,6 +848,7 @@ async function begin(): Promise<void> {
       type: "init",
       resolution: settings.resolution,
       smoothing: settings.smoothing,
+      tone: settings.tone,
       mobile: isMobile,
       force: forced === "wasm" || forced === "webgpu" ? forced : undefined,
     });
@@ -869,7 +889,22 @@ structureRange.addEventListener("input", () =>
   applyStructure(Number(structureRange.value)),
 );
 
+toneRange.addEventListener("input", () => applyTone(Number(toneRange.value)));
+
 qualityToggle.addEventListener("change", () => applyQuality(qualityToggle.checked));
+
+// Settings persist across visits, which is right until a stored layout or a
+// stale preset is the reason the app does not look the way it should. This
+// clears them and reloads on the defaults.
+resetButton.addEventListener("click", () => {
+  try {
+    localStorage.removeItem("depth-realtime:settings");
+  } catch {
+    /* private browsing */
+  }
+  location.hash = "";
+  location.reload();
+});
 
 adaptiveToggle.addEventListener("change", () => {
   settings.adaptive = adaptiveToggle.checked;
@@ -952,6 +987,7 @@ applyMirror(settings.mirror);
 applySplit(settings.split);
 applyGuide(settings.guide);
 applyStructure(settings.structure);
+applyTone(settings.tone);
 
 // Reflect a stored quality flag without re-running the preset: the values it
 // would set are already restored, and re-applying them would overwrite anything
