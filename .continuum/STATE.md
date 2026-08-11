@@ -23,14 +23,28 @@ Repo artık PUBLIC.
 
 # Sıradaki adım
 
-ÖNCE ÖLÇÜM DÜZENEĞİ: quality.mjs koşular arası karşılaştırma için güvenilmez
-(aynı ayarla edgeAlignment 3.9 ile 7.5 arasında oynuyor). Tek oturumda çoklu
-varyant ölçecek şekilde yeniden yazılmalı — tıpkı görsel A/B'de yapıldığı gibi:
-sayfayı bir kez aç, kontrolü yerinde değiştir, her varyantta ölç. Bu yapılmadan
-küçük farklar değerlendirilemez.
+DA3-small kuantalama. Araştırma bulgusu aşağıda; özet: DA3-small hesap maliyeti
+nötr, uzun menzilde belirgin daha iyi (ETH3D δ1 86.5 -> 98.6), Apache-2.0, ama
+depoda sadece fp32 var (105.3 MB). Kuantalanmadan geçiş indirmeyi masaüstünde
+2.1x, mobilde 5.5x büyütür — kullanıcının "kompakt olsun" isteğine ters.
 
-Sonra DA3-small kuantalama (aşağıdaki araştırma bulgusuna bak), sonra görev 5:
-eş derinlik kontur çizgileri. Compose shader'ında, LUT aramasından
+Adımlar:
+1. Kaggle/Colab notebook ile fp16 + q8 + q4f16 export (GPU gerekmiyor).
+   DİKKAT: DA3 kafasındaki Exp düğümü fp32 kalmalı (op_block_list=["Exp"]),
+   yoksa taşma. Notebook kodu araştırma bulgusunda.
+2. Çıktıları kullanıcının HF hesabına, transformers.js'in beklediği dosya
+   adlarıyla koy (fp16 -> model_fp16.onnx, q8 -> model_quantized.onnx,
+   q4f16 -> model_q4f16.onnx).
+3. Kodda üç değişiklik: MODEL_ID, toTensor rank 5 ([1,1,3,H,W]), ve normalise()
+   içinde ters çevirme (DA3 büyük = UZAK).
+4. DA3'e geçilirse ton eğrisi KAPATILMALI (ölçüldü: DA3'te dL* 50.2 -> 41.1).
+5. `--vary` ile DA2/DA3 karşılaştırması yapılamaz (model değişimi oturum
+   gerektirir); iki ayrı koşuda, aynı sahnede, aynı anda ölçülmeli.
+
+Kullanıcı onayı gerekiyor: HF hesabına model yüklemek onun hesabında kalıcı bir
+değişiklik. Kaggle token'ı da yenilenmeli (eski token sohbette ifşa oldu).
+
+Sonra görev 5: eş derinlik kontur çizgileri. Compose shader'ında, LUT aramasından
 hemen önce; `fract(t * bandCount)` üzerinden `fwidth` ile antialiaslı ince
 çizgi. Açılıp kapanabilir olmalı (View grubunda switch).
 
@@ -45,6 +59,11 @@ otomatik salınımdan daha güçlü.
 
 - `tests/quality.mjs` yazıldı: sabit y4m girdiyle kenar hizalama, yüksek frekans
   ve zamansal kayma ölçüyor; `--save` / `--compare` ile kayıt tutuyor
+- `--vary` eklendi: tek oturumda çoklu varyant, ileri+geri sıra ile sürüklenme
+  dengelemesi. Koşular arası karşılaştırma GÜVENİLMEZ (aynı ayarla edge 3.9-7.5);
+  karar verilecek her karşılaştırma `--vary` ile yapılmalı.
+  Kullanım: `SCENES=demo20 node tests/quality.mjs --vary tone=0,0.4,0.7,1`
+  Değiştirilebilir ayarlar: tone, structure, guide, smooth, res.
 - Taban çizgisi `.continuum/quality/baseline.json`: edgeAlignment 5.891,
   highFrequency 24.15, temporalDrift 7.158, 9.6 fps (ölçüm modunda res=350 sabit,
   adaptive kapalı, üç sahne ortalaması)
@@ -114,6 +133,20 @@ Ajan iki modeli de yerel onnxruntime ile aynı görüntülerde çalıştırdı:
 
 # Ölçülmüş bulgular
 
+- AYAR TARAMALARI (eşleştirilmiş, tek oturum, demo20, ileri+geri ortalaması):
+  tone:      0 -> edge 5.12 far 6.35 drift 8.16
+             0.4 -> edge -%20, far +%70
+             0.7 -> edge -%15, far +%73, drift 5.34 (EN DÜŞÜK)  <- varsayılan
+             1.0 -> edge -%31, far +%109, drift 14.30 (kararsız)
+    Sonuç: 0.7 optimum. 1.0 arka planı daha çok açıyor ama titreme üçe katlanıyor
+    ve ön plan kenarları belirgin bozuluyor.
+  structure: 0 -> highFreq 12.8
+             0.3 -> +%54
+             0.6 -> +%76  <- varsayılan
+             1.0 -> +%120, edge +%32
+    Sonuç: yapı miktarı tekdüze artıyor, fps sabit. edge metriği bu taramada
+    gürültülü (monoton değil), o yüzden 0.6 -> 1.0 kararı ölçümle verilemedi;
+    görsel değerlendirme gerekiyor.
 - WebGPU'da dtype hızı (ölçüldü, tek sahne): fp16 19.4 fps, q4f16 12.4 fps,
   q8 0.8 fps. Araştırmanın "q8 2x hızlı" bulgusu CPU/WASM içindir, WebGPU'da
   TERSİ geçerli. Varsayılan fp16 doğru.
@@ -207,4 +240,4 @@ bak.
 
 # Son güncelleme
 
-2026-08-11
+2026-08-11 (ölçüm düzeneği eşleştirilmiş karşılaştırmaya geçirildi)
