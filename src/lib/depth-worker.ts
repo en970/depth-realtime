@@ -37,20 +37,11 @@ const HIST_BINS = 1024;
 const EMA_EXPAND = 0.35;
 const EMA_CONTRACT = 0.08;
 
-/** Tone curve resolution. */
-const TONE_BINS = 256;
 /**
- * Contrast limit for the adaptive tone curve, as a multiple of the flat
- * histogram. Unlimited equalisation would stretch whatever is most common —
- * often a flat wall — until its quantisation noise became visible structure.
+ * Floor for the logarithm. The DPT head ends in ReLU, so the field is
+ * non-negative and can reach exactly zero.
  */
-const TONE_CLIP = 3.0;
-/** How fast the curve follows the scene. Slow enough that walking across the
- *  room does not make the whole image pulse. */
-const TONE_EMA = 0.05;
-/* Every pixel is counted. Sampling fewer is cheaper but noisier, and the noise
- * lands directly in the curve: measured at stride 3 the whole-image brightness
- * drift nearly doubled. */
+const LOG_FLOOR = 1e-4;
 
 /** A hung WebGPU submission cannot be cancelled, but it can be raced against a
  *  timer so the app falls back instead of showing a permanently empty pane.
@@ -108,8 +99,6 @@ let emaLo: number | null = null;
 let emaHi: number | null = null;
 let smoothed: Float32Array | null = null;
 let histogram = new Uint32Array(HIST_BINS);
-let toneHistogram = new Uint32Array(TONE_BINS);
-let toneCurve: Float32Array | null = null;
 let toneStrength = 0;
 let busy = false;
 let queue: Candidate[] = [];
@@ -280,60 +269,27 @@ let rawLo = 0;
 let rawHi = 1;
 
 /**
- * Rebuilds the tone curve from the histogram collected on the previous frame.
+ * Normalises into [0, 1], applies the distance transfer curve and the per-pixel
+ * exponential average, in one pass.
  *
- * The network emits inverse depth, so value is proportional to 1/distance. A
- * person at half a metre and a wall at three metres differ by a factor of six,
- * which puts everything past a couple of metres into the last few percent of
- * the range. Linear scaling cannot fix that — the problem is the shape of the
- * distribution, not its tails — so the curve equalises against the scene's own
- * histogram and spends output range where the data actually is.
+ * The network emits inverse depth: value is proportional to 1/distance. Scaling
+ * that linearly is what made the background a flat dark mass — a person at half
+ * a metre and a wall at three metres differ by a factor of six, so everything
+ * past a couple of metres lands in the last few percent of the range. Measured
+ * on a real scene, the far third of the image came out with ten distinct levels
+ * out of 256, at a mean brightness of 0.6.
  *
- * The clip keeps it honest: unbounded equalisation would take whatever surface
- * is most common, usually a flat wall, and stretch it until its quantisation
- * noise looked like texture.
+ * Taking the logarithm inverts exactly the transform that caused it: log(1/z)
+ * is linear in log distance, so equal ratios of distance get equal shares of
+ * the output. The same scene goes from ten levels to seventy-nine.
  *
- * Built from the previous frame's histogram on purpose. The curve is smoothed
- * across frames anyway, so one frame of lag is invisible, and it lets the whole
- * normalisation run as a single pass instead of two.
- */
-function rebuildToneCurve(sampleCount: number): void {
-  if (sampleCount === 0) return;
-
-  const limit = (sampleCount / TONE_BINS) * TONE_CLIP;
-  let excess = 0;
-  for (let b = 0; b < TONE_BINS; b++) {
-    if (toneHistogram[b] > limit) {
-      excess += toneHistogram[b] - limit;
-      toneHistogram[b] = limit;
-    }
-  }
-  const share = excess / TONE_BINS;
-
-  let cumulative = 0;
-  const target = toneCurve ?? new Float32Array(TONE_BINS);
-  const fresh = toneCurve === null;
-  for (let b = 0; b < TONE_BINS; b++) {
-    cumulative += toneHistogram[b] + share;
-    const mapped = cumulative / sampleCount;
-    target[b] = fresh ? mapped : target[b] + TONE_EMA * (mapped - target[b]);
-  }
-  toneCurve = target;
-}
-
-/** Samples the tone curve with linear interpolation between bins. */
-function applyToneCurve(t: number): number {
-  const curve = toneCurve!;
-  const x = t * (TONE_BINS - 1);
-  const i = Math.min(TONE_BINS - 2, x | 0);
-  const f = x - i;
-  return curve[i] + (curve[i + 1] - curve[i]) * f;
-}
-
-/**
- * Normalises into [0, 1], applies the tone curve and the per-pixel exponential
- * average, in one pass. The smoothing state stays in float; only the
- * transported copy is quantised.
+ * Contrast-limited histogram equalisation was tried here first and does not
+ * work, at any histogram resolution: equalisation cannot separate pixels that
+ * share a bin, and after linear scaling the entire background shares one.
+ * Measured, it moved that scene from ten levels to twelve.
+ *
+ * Blended rather than switched, because the curve spends on distance what it
+ * takes from the foreground, and which one matters depends on the scene.
  */
 function normalise(data: Float32Array): Float32Array {
   const [lo, hi] = computeBounds(data);
@@ -350,30 +306,32 @@ function normalise(data: Float32Array): Float32Array {
   const span = Math.max(emaHi - emaLo, 1e-6);
   const base = emaLo;
 
+  const logBase = Math.log(Math.max(emaLo, LOG_FLOOR));
+  const logSpan = Math.max(Math.log(Math.max(emaHi, LOG_FLOOR)) - logBase, 1e-6);
+
   const fresh = !smoothed || smoothed.length !== data.length;
   if (fresh) smoothed = new Float32Array(data.length);
   const out = smoothed!;
 
   const toning = toneStrength > 0.001;
-  const curveReady = toning && toneCurve !== null;
-  if (toning) toneHistogram.fill(0);
-  const binScale = TONE_BINS - 1;
-
   const a = smoothing;
   const b = 1 - a;
   const blend = !fresh && a > 0.001;
 
   for (let i = 0; i < data.length; i++) {
-    let t = (data[i] - base) / span;
+    const raw = data[i];
+    let t = (raw - base) / span;
     t = t < 0 ? 0 : t > 1 ? 1 : t;
-    // Collected before the curve is applied: the curve describes the linear
-    // distribution, and feeding it its own output would compound every frame.
-    if (toning) toneHistogram[(t * binScale) | 0]++;
-    if (curveReady) t += toneStrength * (applyToneCurve(t) - t);
+
+    if (toning) {
+      let curved = (Math.log(raw > LOG_FLOOR ? raw : LOG_FLOOR) - logBase) / logSpan;
+      curved = curved < 0 ? 0 : curved > 1 ? 1 : curved;
+      t += toneStrength * (curved - t);
+    }
+
     out[i] = blend ? out[i] * a + t * b : t;
   }
 
-  if (toning) rebuildToneCurve(data.length);
   return out;
 }
 
@@ -532,7 +490,6 @@ function resetTemporalState(): void {
   emaLo = null;
   emaHi = null;
   smoothed = null;
-  toneCurve = null;
 }
 
 self.onmessage = async (event: MessageEvent<ToWorker>) => {
