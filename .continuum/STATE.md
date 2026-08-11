@@ -142,8 +142,10 @@ Yapılanlar:
 - Süre (CPU fp32): DA3, DA2'nin ~1.15x'i, yani biraz daha yavaş.
 - q8 kuantalama BAŞARILI: 105.3 MB -> 28.9 MB, korelasyon 0.990-0.998,
   CPU'da 2x hızlanma, arka plan seviyeleri korunuyor (179 -> 177).
-- HF'ye yüklendi: https://huggingface.co/enes970/depth-anything-v3-small-onnx
-  (Apache-2.0, kullanıcının HF hesabı `enes970`; GitHub hesabı `en970` — FARKLI).
+- HF'ye yüklendi: https://huggingface.co/en970/depth-anything-v3-small-onnx
+  (Apache-2.0). Hesap adı 2026-08-11'de enes970 -> en970 olarak değişti; artık
+  GitHub ile aynı. Eski isimli URL'ler HF tarafında 307 ile yönleniyor ama kodda
+  yeni isim kullanılıyor.
 - Kod iki modeli de destekliyor: `#model=v3` URL parametresi. V3 için rank 5
   tensör, ters çevirme (V3 büyük = UZAK) ve log ton eğrisinin KAPATILMASI
   otomatik yapılıyor.

@@ -44,7 +44,7 @@ const MODELS = {
     invert: false,
   },
   v3: {
-    id: "enes970/depth-anything-v3-small-onnx",
+    id: "en970/depth-anything-v3-small-onnx",
     rank5: true,
     /** Depth: large-is-far, so it must be flipped. */
     invert: true,
