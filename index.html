@@ -143,6 +143,27 @@
             </p>
           </div>
           <div class="field">
+            <label class="field__label" for="contour-range">
+              Depth contours
+              <span class="field__value" id="contour-value">0.00</span>
+            </label>
+            <input
+              class="range"
+              id="contour-range"
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value="0"
+            />
+            <p class="field__hint">
+              A line at every fixed step of depth, as on a topographic map. A
+              smooth ramp shows that two surfaces differ but not by how much;
+              lines make it countable, and reveal gradients too shallow to see
+              as colour.
+            </p>
+          </div>
+          <div class="field">
             <label class="field__label" for="structure-range">
               Relief shading
               <span class="field__value" id="structure-value">0.60</span>

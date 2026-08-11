@@ -84,6 +84,8 @@ uniform float uNoiseFloor;
 uniform float uGuideAmountS;
 uniform float uRangeSigmaS;
 uniform float uStructureS;
+uniform float uContours;      // 0 = off, 1 = full strength
+uniform float uContourBands;  // number of iso-depth steps across the range
 
 float hashS(vec2 p) {
   return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
@@ -174,13 +176,28 @@ void main() {
   // invert lightness order across half the range.
   float gain = clamp(1.0 + uStructureS * (halo + cavity + relief), 0.86, 1.10);
 
+  // Iso-depth contours, drawn from the undithered value: a topographic map
+  // reading of the same field. A smooth ramp shows that two surfaces differ but
+  // not by how much; a line every fixed step turns that into something
+  // countable, which is also how a shallow gradient becomes visible at all.
+  float contour = 1.0;
+  if (uContours > 0.001) {
+    float bands = t * uContourBands;
+    float distance = min(fract(bands), 1.0 - fract(bands));
+    // fwidth keeps the line one pixel wide wherever the gradient takes it,
+    // instead of thin on steep surfaces and a wide band on flat ones.
+    float width = fwidth(bands);
+    contour = smoothstep(0.0, max(width, 1e-5), distance);
+    contour = mix(1.0, mix(0.55, 1.0, contour), uContours);
+  }
+
   float shaded = t + (hashS(gl_FragCoord.xy) - 0.5) / 255.0;
   float lutWidth = float(textureSize(uLutTex, 0).x);
   float lutU = (clamp(shaded, 0.0, 1.0) * (lutWidth - 1.0) + 0.5) / lutWidth;
   vec3 rgb = texture(uLutTex, vec2(lutU, 0.5)).rgb;
 
-  if (uStructureS > 0.001) {
-    vec3 linear = pow(rgb, vec3(2.2)) * gain;
+  if (uStructureS > 0.001 || uContours > 0.001) {
+    vec3 linear = pow(rgb, vec3(2.2)) * gain * contour;
     rgb = pow(max(linear, 0.0), vec3(1.0 / 2.2));
   }
 
@@ -220,6 +237,8 @@ export class DepthRenderer {
   private guideAmount = 0;
   private rangeSigma = 0.06;
   private structure = 0;
+  private contours = 0;
+  private contourBands = 16;
   private mixStart = 0;
   private mixDuration = 1;
   private frames = 0;
@@ -265,7 +284,7 @@ export class DepthRenderer {
     for (const name of [
       "uField", "uGuideTex", "uLutTex", "uTexel", "uCoverS", "uLight",
       "uExaggeration", "uBase", "uNoiseFloor", "uGuideAmountS", "uRangeSigmaS",
-      "uStructureS",
+      "uStructureS", "uContours", "uContourBands",
     ]) {
       this.composeUniforms[name] = gl.getUniformLocation(this.composeProgram, name);
     }
@@ -363,6 +382,12 @@ export class DepthRenderer {
 
   setStructure(amount: number): void {
     this.structure = amount;
+    this.recompose();
+  }
+
+  setContours(amount: number, bands = 16): void {
+    this.contours = amount;
+    this.contourBands = bands;
     this.recompose();
   }
 
@@ -497,6 +522,8 @@ export class DepthRenderer {
     gl.uniform1f(this.composeUniforms.uGuideAmountS, this.guideSource ? this.guideAmount : 0);
     gl.uniform1f(this.composeUniforms.uRangeSigmaS, this.rangeSigma);
     gl.uniform1f(this.composeUniforms.uStructureS, this.structure);
+    gl.uniform1f(this.composeUniforms.uContours, this.contours);
+    gl.uniform1f(this.composeUniforms.uContourBands, this.contourBands);
     // Light from the north-north-west at 45 degrees elevation. Above-left is the
     // cartographic convention for shaded relief; from below, hollows read as
     // bumps.

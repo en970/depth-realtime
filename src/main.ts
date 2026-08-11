@@ -57,6 +57,8 @@ const structureRange = $<HTMLInputElement>("structure-range");
 const structureValue = $<HTMLElement>("structure-value");
 const toneRange = $<HTMLInputElement>("tone-range");
 const toneValue = $<HTMLElement>("tone-value");
+const contourRange = $<HTMLInputElement>("contour-range");
+const contourValue = $<HTMLElement>("contour-value");
 const compareInput = $<HTMLInputElement>("compare-input");
 const infoBackend = $<HTMLElement>("info-backend");
 const infoDtype = $<HTMLElement>("info-dtype");
@@ -84,6 +86,8 @@ interface Settings {
   structure: number;
   /** Adaptive tone curve strength: opens up distant, compressed depths. */
   tone: number;
+  /** Iso-depth contour line strength. */
+  contours: number;
   quality: boolean;
 }
 
@@ -102,6 +106,7 @@ const defaults: Settings = {
   guideSigma: 0.06,
   structure: 0.6,
   tone: 0.7,
+  contours: 0,
   quality: false,
 };
 
@@ -153,6 +158,9 @@ function readSettings(): Partial<Settings> {
   const tone = pickNumber("tone", 0, 1);
   if (tone !== null) out.tone = tone;
 
+  const contours = pickNumber("contours", 0, 1);
+  if (contours !== null) out.contours = contours;
+
   // Advanced, URL only: how different the camera pixel has to be before a depth
   // sample stops counting. Exposed for tuning runs rather than for the panel.
   const sigma = pickNumber("sigma", 0.005, 0.5);
@@ -183,6 +191,7 @@ function persistSettings(): void {
       guide: settings.guide.toFixed(2),
       structure: settings.structure.toFixed(2),
       tone: settings.tone.toFixed(2),
+      contours: settings.contours.toFixed(2),
       mirror: settings.mirror ? "1" : "0",
       adaptive: settings.adaptive ? "1" : "0",
       quality: settings.quality ? "1" : "0",
@@ -689,6 +698,15 @@ function applyTone(value: number): void {
   persistSettings();
 }
 
+function applyContours(value: number): void {
+  settings.contours = value;
+  contourRange.value = String(value);
+  contourValue.textContent = value.toFixed(2);
+  setRangeFill(contourRange);
+  renderer.setContours(value);
+  persistSettings();
+}
+
 function applyStructure(value: number): void {
   settings.structure = value;
   structureRange.value = String(value);
@@ -900,6 +918,10 @@ structureRange.addEventListener("input", () =>
 
 toneRange.addEventListener("input", () => applyTone(Number(toneRange.value)));
 
+contourRange.addEventListener("input", () =>
+  applyContours(Number(contourRange.value)),
+);
+
 qualityToggle.addEventListener("change", () => applyQuality(qualityToggle.checked));
 
 // Settings persist across visits, which is right until a stored layout or a
@@ -997,6 +1019,7 @@ applySplit(settings.split);
 applyGuide(settings.guide);
 applyStructure(settings.structure);
 applyTone(settings.tone);
+applyContours(settings.contours);
 
 // Reflect a stored quality flag without re-running the preset: the values it
 // would set are already restored, and re-applying them would overwrite anything
