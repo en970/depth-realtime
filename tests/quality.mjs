@@ -30,11 +30,29 @@
  *                  flicker introduced by the pipeline. Detail improvements must
  *                  not buy their gain here.
  *
+ * Two modes:
+ *
+ *   Absolute — one measurement of the current settings, saved or compared
+ *   against a stored record. Use for tracking the project over time.
+ *
+ *   Paired (--vary) — several settings measured inside ONE browser session,
+ *   with the control changed in place. Use for deciding whether a change helps.
+ *   Separate sessions are not comparable: the model output drifts, the
+ *   normalisation settles differently, and the machine load moves underneath.
+ *   Measured, the same settings across sessions gave edge alignment anywhere
+ *   between 3.9 and 7.5. In one session the same comparison is stable.
+ *
+ *   The variants are measured forwards then backwards and averaged, so that any
+ *   drift over the session — thermal, cache, adaptive state — falls on all of
+ *   them equally instead of favouring whichever went first.
+ *
  * Usage:
  *   npm run preview
- *   node tests/quality.mjs                       # measures, prints JSON
- *   node tests/quality.mjs --save baseline       # also writes a named record
- *   node tests/quality.mjs --compare baseline    # diffs against that record
+ *   node tests/quality.mjs                        # measure current settings
+ *   node tests/quality.mjs --save baseline        # ... and store it
+ *   node tests/quality.mjs --compare baseline     # ... and diff against it
+ *   node tests/quality.mjs --vary tone=0,0.7      # paired comparison
+ *   node tests/quality.mjs --vary structure=0,0.6,1
  */
 
 import { chromium } from "playwright";
@@ -61,12 +79,22 @@ const HASH = process.env.HASH ?? "#mirror=0&adaptive=0&res=350&smooth=0&mode=spl
 const args = process.argv.slice(2);
 const saveAs = args.includes("--save") ? args[args.indexOf("--save") + 1] : null;
 const compareTo = args.includes("--compare") ? args[args.indexOf("--compare") + 1] : null;
+const varySpec = args.includes("--vary") ? args[args.indexOf("--vary") + 1] : null;
+
+/** Settings that can be changed in place, without rebuilding the session. */
+const CONTROLS = {
+  tone: "tone-range",
+  structure: "structure-range",
+  guide: "guide-range",
+  smooth: "smoothing-range",
+  res: "resolution-range",
+};
 
 /** Sampling grid for the metrics. Independent of canvas or tensor size. */
 const GRID_W = 320;
 const GRID_H = 180;
 
-async function measureScene(scene) {
+async function openScene(scene) {
   const y4m = join(SCENE_DIR, `${scene}.y4m`);
   if (!existsSync(y4m)) throw new Error(`missing scene file: ${y4m}`);
 
@@ -94,10 +122,27 @@ async function measureScene(scene) {
   // The first seconds are not representative: the adaptive controller, the
   // normalisation bounds and the browser's own warm-up are all still moving.
   await page.waitForTimeout(10_000);
+  return { context, page, errors };
+}
 
-  // One reading is not enough: repeated runs of the same scene and settings
-  // disagreed by a factor of three. Each metric is the median of REPEATS
-  // independent readings, which is stable to within a few percent.
+/** Sets a control and waits for the pipeline to settle on the new value. */
+async function applySetting(page, name, value) {
+  const control = CONTROLS[name];
+  if (!control) throw new Error(`no in-place control for "${name}"`);
+  await page.evaluate(
+    ({ id, v }) => {
+      const input = document.getElementById(id);
+      input.value = v;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    },
+    { id: control, v: String(value) },
+  );
+  // The tone curve and the normalisation bounds are both smoothed across
+  // frames, so a changed setting needs time before it is what is measured.
+  await page.waitForTimeout(Number(process.env.SETTLE ?? 5000));
+}
+
+async function collect(page) {
   const REPEATS = Number(process.env.REPEATS ?? 5);
   const readings = [];
   for (let attempt = 0; attempt < REPEATS; attempt++) {
@@ -125,10 +170,47 @@ async function measureScene(scene) {
   result.spreadEdgeAlignment = spread(readings.map((r) => r.edgeAlignment));
   result.spreadFarGradient = spread(readings.map((r) => r.farGradient));
   result.spreadHighFrequency = spread(readings.map((r) => r.highFrequency));
+  return result;
+}
 
+async function measureScene(scene) {
+  const { context, page, errors } = await openScene(scene);
+  const result = await collect(page);
   await context.close();
   if (errors.length) result.pageErrors = errors.slice(0, 3);
   return result;
+}
+
+/**
+ * Measures several values of one setting inside a single session, forwards then
+ * backwards, averaging the two directions so that drift over the session falls
+ * on every variant equally instead of favouring whichever went first.
+ */
+async function measurePaired(scene, name, values) {
+  const { context, page, errors } = await openScene(scene);
+  const order = [...values, ...[...values].reverse()];
+  const collected = new Map(values.map((v) => [v, []]));
+
+  for (const value of order) {
+    await applySetting(page, name, value);
+    collected.get(value).push(await collect(page));
+  }
+
+  await context.close();
+
+  const out = {};
+  for (const [value, runs] of collected) {
+    const averaged = {};
+    for (const key of Object.keys(runs[0])) {
+      const numbers = runs.map((r) => r[key]).filter((n) => typeof n === "number");
+      averaged[key] = numbers.length
+        ? numbers.reduce((a, b) => a + b, 0) / numbers.length
+        : runs[0][key];
+    }
+    out[value] = averaged;
+  }
+  if (errors.length) out.pageErrors = errors.slice(0, 3);
+  return out;
 }
 
 async function readOnce(page) {
@@ -302,6 +384,35 @@ async function readOnce(page) {
     },
     { gw: GRID_W, gh: GRID_H },
   );
+}
+
+if (varySpec) {
+  const [name, listed] = varySpec.split("=");
+  const values = listed.split(",");
+  if (!CONTROLS[name]) {
+    console.error(`unknown setting "${name}". Available: ${Object.keys(CONTROLS).join(", ")}`);
+    process.exit(1);
+  }
+
+  for (const scene of SCENES) {
+    console.log(`\n${scene}, varying ${name}:`);
+    const results = await measurePaired(scene, name, values);
+    const rows = values.map((v) => ({ value: v, ...results[v] }));
+    const first = rows[0];
+    for (const row of rows) {
+      const delta = (now, then) =>
+        then === 0 ? "" : ` (${now >= then ? "+" : ""}${(((now - then) / then) * 100).toFixed(0)}%)`;
+      console.log(
+        `  ${name}=${row.value.padEnd(5)} ` +
+          `edge=${row.edgeAlignment.toFixed(2)}${row === first ? "" : delta(row.edgeAlignment, first.edgeAlignment)} ` +
+          `far=${row.farGradient.toFixed(2)}${row === first ? "" : delta(row.farGradient, first.farGradient)} ` +
+          `highFreq=${row.highFrequency.toFixed(1)}${row === first ? "" : delta(row.highFrequency, first.highFrequency)} ` +
+          `drift=${row.temporalDrift.toFixed(2)} ` +
+          `fps=${row.fps.toFixed(1)}`,
+      );
+    }
+  }
+  process.exit(0);
 }
 
 const record = { scenes: {} };
