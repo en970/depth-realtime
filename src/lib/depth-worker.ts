@@ -48,10 +48,9 @@ const TONE_CLIP = 3.0;
 /** How fast the curve follows the scene. Slow enough that walking across the
  *  room does not make the whole image pulse. */
 const TONE_EMA = 0.05;
-/** Histogram stride. Sampling fewer pixels is cheaper but noisier, and the
- *  noise lands directly in the curve: measured at stride 3 the whole-image
- *  brightness drift nearly doubled. Every pixel it is. */
-const TONE_STRIDE = 1;
+/* Every pixel is counted. Sampling fewer is cheaper but noisier, and the noise
+ * lands directly in the curve: measured at stride 3 the whole-image brightness
+ * drift nearly doubled. */
 
 /** A hung WebGPU submission cannot be cancelled, but it can be raced against a
  *  timer so the app falls back instead of showing a permanently empty pane.
@@ -112,7 +111,6 @@ let histogram = new Uint32Array(HIST_BINS);
 let toneHistogram = new Uint32Array(TONE_BINS);
 let toneCurve: Float32Array | null = null;
 let toneStrength = 0;
-let scratch: Float32Array | null = null;
 let busy = false;
 let queue: Candidate[] = [];
 
@@ -125,8 +123,11 @@ function post(message: FromWorker, transfer?: Transferable[]): void {
  * before it is accepted, so a driver that fails only at first inference is
  * caught here rather than in front of the user.
  */
-async function candidates(force?: "webgpu" | "wasm"): Promise<Candidate[]> {
-  const wasm: Candidate = { backend: "wasm", dtype: "q8" };
+async function candidates(
+  force?: "webgpu" | "wasm",
+  forceDtype?: Dtype,
+): Promise<Candidate[]> {
+  const wasm: Candidate = { backend: "wasm", dtype: forceDtype ?? "q8" };
   if (force === "wasm") return [wasm];
 
   const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
@@ -141,6 +142,7 @@ async function candidates(force?: "webgpu" | "wasm"): Promise<Candidate[]> {
   if (!adapter) return force === "webgpu" ? [] : [wasm];
 
   const list: Candidate[] = [];
+  if (forceDtype) return [{ backend: "webgpu", dtype: forceDtype }, wasm];
   if (adapter.features.has("shader-f16")) {
     // 19 MB against 50 MB. On a phone the download dominates time-to-first-frame
     // and the quality difference is not visible at these input resolutions.
@@ -277,8 +279,62 @@ function computeBounds(data: Float32Array): [number, number] {
 let rawLo = 0;
 let rawHi = 1;
 
-/** Normalises into [0, 1] and applies the per-pixel exponential average. The
- *  smoothing state stays in float; only the transported copy is quantised. */
+/**
+ * Rebuilds the tone curve from the histogram collected on the previous frame.
+ *
+ * The network emits inverse depth, so value is proportional to 1/distance. A
+ * person at half a metre and a wall at three metres differ by a factor of six,
+ * which puts everything past a couple of metres into the last few percent of
+ * the range. Linear scaling cannot fix that — the problem is the shape of the
+ * distribution, not its tails — so the curve equalises against the scene's own
+ * histogram and spends output range where the data actually is.
+ *
+ * The clip keeps it honest: unbounded equalisation would take whatever surface
+ * is most common, usually a flat wall, and stretch it until its quantisation
+ * noise looked like texture.
+ *
+ * Built from the previous frame's histogram on purpose. The curve is smoothed
+ * across frames anyway, so one frame of lag is invisible, and it lets the whole
+ * normalisation run as a single pass instead of two.
+ */
+function rebuildToneCurve(sampleCount: number): void {
+  if (sampleCount === 0) return;
+
+  const limit = (sampleCount / TONE_BINS) * TONE_CLIP;
+  let excess = 0;
+  for (let b = 0; b < TONE_BINS; b++) {
+    if (toneHistogram[b] > limit) {
+      excess += toneHistogram[b] - limit;
+      toneHistogram[b] = limit;
+    }
+  }
+  const share = excess / TONE_BINS;
+
+  let cumulative = 0;
+  const target = toneCurve ?? new Float32Array(TONE_BINS);
+  const fresh = toneCurve === null;
+  for (let b = 0; b < TONE_BINS; b++) {
+    cumulative += toneHistogram[b] + share;
+    const mapped = cumulative / sampleCount;
+    target[b] = fresh ? mapped : target[b] + TONE_EMA * (mapped - target[b]);
+  }
+  toneCurve = target;
+}
+
+/** Samples the tone curve with linear interpolation between bins. */
+function applyToneCurve(t: number): number {
+  const curve = toneCurve!;
+  const x = t * (TONE_BINS - 1);
+  const i = Math.min(TONE_BINS - 2, x | 0);
+  const f = x - i;
+  return curve[i] + (curve[i + 1] - curve[i]) * f;
+}
+
+/**
+ * Normalises into [0, 1], applies the tone curve and the per-pixel exponential
+ * average, in one pass. The smoothing state stays in float; only the
+ * transported copy is quantised.
+ */
 function normalise(data: Float32Array): Float32Array {
   const [lo, hi] = computeBounds(data);
   rawLo = lo;
@@ -292,103 +348,33 @@ function normalise(data: Float32Array): Float32Array {
     emaHi += (hi > emaHi ? EMA_EXPAND : EMA_CONTRACT) * (hi - emaHi);
   }
   const span = Math.max(emaHi - emaLo, 1e-6);
+  const base = emaLo;
 
   const fresh = !smoothed || smoothed.length !== data.length;
   if (fresh) smoothed = new Float32Array(data.length);
   const out = smoothed!;
 
-  // Linear pass first: the tone curve has to be built from normalised values.
-  const linear = scratch && scratch.length === data.length ? scratch : new Float32Array(data.length);
-  scratch = linear;
-  for (let i = 0; i < data.length; i++) {
-    linear[i] = clamp01((data[i] - emaLo) / span);
-  }
-
-  if (toneStrength > 0.001) {
-    updateToneCurve(linear);
-    for (let i = 0; i < linear.length; i++) {
-      // Blended rather than switched: at full strength the curve can flatten
-      // the foreground it is trying to keep, and the mix lets that be traded.
-      linear[i] += toneStrength * (applyToneCurve(linear[i]) - linear[i]);
-    }
-  }
-
-  if (fresh) {
-    out.set(linear);
-    return out;
-  }
+  const toning = toneStrength > 0.001;
+  const curveReady = toning && toneCurve !== null;
+  if (toning) toneHistogram.fill(0);
+  const binScale = TONE_BINS - 1;
 
   const a = smoothing;
-  if (a <= 0.001) {
-    out.set(linear);
-  } else {
-    const b = 1 - a;
-    for (let i = 0; i < out.length; i++) {
-      out[i] = out[i] * a + linear[i] * b;
-    }
+  const b = 1 - a;
+  const blend = !fresh && a > 0.001;
+
+  for (let i = 0; i < data.length; i++) {
+    let t = (data[i] - base) / span;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    // Collected before the curve is applied: the curve describes the linear
+    // distribution, and feeding it its own output would compound every frame.
+    if (toning) toneHistogram[(t * binScale) | 0]++;
+    if (curveReady) t += toneStrength * (applyToneCurve(t) - t);
+    out[i] = blend ? out[i] * a + t * b : t;
   }
+
+  if (toning) rebuildToneCurve(data.length);
   return out;
-}
-
-function clamp01(v: number): number {
-  return v < 0 ? 0 : v > 1 ? 1 : v;
-}
-
-/**
- * Builds a contrast-limited equalisation curve for the current frame.
- *
- * The network emits inverse depth, so value is proportional to 1/distance. A
- * person at half a metre and a wall at three metres differ by a factor of six,
- * which means everything beyond a couple of metres lands in the last few
- * percent of the range — a flat dark mass with no visible structure, however
- * much detail the model actually recovered. Linear scaling cannot fix that,
- * because the problem is the shape of the distribution rather than its tails.
- *
- * Equalising against the scene's own histogram spends output range where the
- * data actually is. The clip keeps it honest: without it, a large flat surface
- * would dominate the histogram and get stretched until its quantisation noise
- * looked like texture.
- */
-function updateToneCurve(values: Float32Array): void {
-  toneHistogram.fill(0);
-  const scale = TONE_BINS - 1;
-  let counted = 0;
-  for (let i = 0; i < values.length; i += TONE_STRIDE) {
-    toneHistogram[(values[i] * scale) | 0]++;
-    counted++;
-  }
-
-  // Clip tall bins and hand the excess back evenly, so no single surface can
-  // claim an unbounded share of the output range.
-  const limit = (counted / TONE_BINS) * TONE_CLIP;
-  let excess = 0;
-  for (let b = 0; b < TONE_BINS; b++) {
-    if (toneHistogram[b] > limit) {
-      excess += toneHistogram[b] - limit;
-      toneHistogram[b] = limit;
-    }
-  }
-  const share = excess / TONE_BINS;
-
-  let cumulative = 0;
-  const total = counted;
-  const target = toneCurve ?? new Float32Array(TONE_BINS);
-  const fresh = toneCurve === null;
-  for (let b = 0; b < TONE_BINS; b++) {
-    cumulative += toneHistogram[b] + share;
-    const mapped = cumulative / total;
-    target[b] = fresh ? mapped : target[b] + TONE_EMA * (mapped - target[b]);
-  }
-  toneCurve = target;
-}
-
-/** Samples the tone curve with linear interpolation between bins. */
-function applyToneCurve(t: number): number {
-  const curve = toneCurve!;
-  const x = t * (TONE_BINS - 1);
-  const i = Math.min(TONE_BINS - 2, x | 0);
-  const f = x - i;
-  return curve[i] + (curve[i + 1] - curve[i]) * f;
 }
 
 async function handleFrame(
@@ -546,7 +532,6 @@ function resetTemporalState(): void {
   emaLo = null;
   emaHi = null;
   smoothed = null;
-  scratch = null;
   toneCurve = null;
 }
 
@@ -559,7 +544,7 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
     toneStrength = message.tone ?? 0;
     mobile = message.mobile;
     post({ type: "status", stage: "starting" });
-    queue = await candidates(message.force);
+    queue = await candidates(message.force, message.forceDtype);
     if (queue.length === 0) {
       post({
         type: "error",

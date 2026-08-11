@@ -14,6 +14,8 @@ export interface InitMessage {
   tone?: number;
   /** Diagnostic override, set through the `backend` URL parameter. */
   force?: "webgpu" | "wasm";
+  /** Diagnostic override, set through the `dtype` URL parameter. */
+  forceDtype?: Dtype;
 }
 
 export interface FrameMessage {

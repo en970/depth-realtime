@@ -843,7 +843,10 @@ async function begin(): Promise<void> {
   // Weight download and permission prompt run concurrently: both are slow and
   // neither depends on the other.
   if (!modelReady) {
-    const forced = new URLSearchParams(location.hash.replace(/^#/, "")).get("backend");
+    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const forced = params.get("backend");
+    const forcedDtype = params.get("dtype");
+    const dtypes = ["fp32", "fp16", "q8", "q4f16"];
     send({
       type: "init",
       resolution: settings.resolution,
@@ -851,6 +854,10 @@ async function begin(): Promise<void> {
       tone: settings.tone,
       mobile: isMobile,
       force: forced === "wasm" || forced === "webgpu" ? forced : undefined,
+      forceDtype:
+        forcedDtype && dtypes.includes(forcedDtype)
+          ? (forcedDtype as "fp32" | "fp16" | "q8" | "q4f16")
+          : undefined,
     });
   }
   await startCamera(cameraSelect.value || undefined);
