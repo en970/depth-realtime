@@ -16,6 +16,8 @@ export interface InitMessage {
   force?: "webgpu" | "wasm";
   /** Diagnostic override, set through the `dtype` URL parameter. */
   forceDtype?: Dtype;
+  /** Which network to run, set through the `model` URL parameter. */
+  model?: "v2" | "v3";
 }
 
 export interface FrameMessage {

@@ -23,7 +23,23 @@ Repo artık PUBLIC.
 
 # Sıradaki adım
 
-DA3-small kuantalama. Araştırma bulgusu aşağıda; özet: DA3-small hesap maliyeti
+DA3 ŞU AN GEÇİLEMEZ — engel fp16 export'u. Durum ve kalan yol aşağıda.
+Bunun yerine sıradaki iş: görev 5 (eş derinlik kontur çizgileri), sonra
+görev 6 (salınımlı 3B) ve 7 (nokta bulutu).
+
+DA3 için kalan tek yol, fp16 export'unu başka bir araçla üretmek:
+- `onnxconverter_common.float16` başarısız: grafikteki mevcut Cast düğümleriyle
+  tip çakışması ("Type (tensor(float16)) of output arg ... does not match
+  expected type (tensor(float))"). op_block_list ["Exp"], ["Exp","Cast"] ve boş
+  liste denendi, üçü de yükleme hatası; `disable_shape_infer=True` 10 dakikada
+  bitmedi.
+- Denenmemiş yollar: optimum.onnxruntime ile yeniden export, PyTorch'tan
+  torch.onnx.export ile fp16, ya da upstream'in (onnx-community) fp16 yayınlamasını
+  beklemek.
+- Alternatif: DA3 fp32'yi (105 MB) YALNIZCA Kalite modunda kullanmak. Hızı
+  tarayıcıda ÖLÇÜLMEDİ; ölçülmeden karar verilmesin.
+
+# Eski sıradaki adım (tamamlandı): DA3-small kuantalama. Araştırma bulgusu aşağıda; özet: DA3-small hesap maliyeti
 nötr, uzun menzilde belirgin daha iyi (ETH3D δ1 86.5 -> 98.6), Apache-2.0, ama
 depoda sadece fp32 var (105.3 MB). Kuantalanmadan geçiş indirmeyi masaüstünde
 2.1x, mobilde 5.5x büyütür — kullanıcının "kompakt olsun" isteğine ters.
@@ -109,6 +125,32 @@ sabit çıktı vermeli. Olası kaynaklar, denenme sırası:
 4. Normalizasyon sınırlarının EMA'sı sabit girdide yakınsamıyor olabilir.
 Bu titreme, kullanıcının "ayrıntı yok" izlenimini besliyor olabilir: kararsız
 bir alan gözde bulanık algılanır.
+
+# DA3 DENEYİ: ölçüldü, uygulanamadı (2026-08-11)
+
+Yapılanlar:
+- DA3-small fp32 indirildi, grafik doğrulandı: girdi rank 5
+  [B, num_images, 3, H, W], çıktılar predicted_depth + confidence + extrinsics
+  + intrinsics, 2 adet Exp düğümü.
+- YEREL KARŞILAŞTIRMA (CPU, fp32, 322 px, aynı üç sahne, projenin kendi
+  normalizasyonu taklit edilerek). Arka planın (en uzak %35) 256 tonda kaç
+  ayırt edilebilir seviyesi kaldığı:
+    demo01:  DA2  10 seviye (ort. parlaklık 0.6/255!)  ->  DA3 179 seviye
+    demo20:  DA2  74                                   ->  DA3  84
+    hf-depth DA2  39                                   ->  DA3  50
+  Yani kullanıcının "arkamı siyah yapıyor" şikayeti demo01'de birebir ölçüldü.
+- Süre (CPU fp32): DA3, DA2'nin ~1.15x'i, yani biraz daha yavaş.
+- q8 kuantalama BAŞARILI: 105.3 MB -> 28.9 MB, korelasyon 0.990-0.998,
+  CPU'da 2x hızlanma, arka plan seviyeleri korunuyor (179 -> 177).
+- HF'ye yüklendi: https://huggingface.co/enes970/depth-anything-v3-small-onnx
+  (Apache-2.0, kullanıcının HF hesabı `enes970`; GitHub hesabı `en970` — FARKLI).
+- Kod iki modeli de destekliyor: `#model=v3` URL parametresi. V3 için rank 5
+  tensör, ters çevirme (V3 büyük = UZAK) ve log ton eğrisinin KAPATILMASI
+  otomatik yapılıyor.
+
+ENGEL — ölçüldü: DA3 q8 tarayıcıda WebGPU'da **0.7 fps**. Bu, daha önce DA2 q8
+ile ölçülen 0.8 fps ile tutarlı: WebGPU'da 8-bit ağırlıklar hızlı yol DEĞİL
+(dequantize maliyeti). fp16 gerekli, o da üretilemedi.
 
 # Araştırma bulgusu: DA3-small (2026-08-11, workflow wf_e8e81111-fb3)
 

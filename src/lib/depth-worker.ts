@@ -23,7 +23,36 @@ import type {
   ToWorker,
 } from "./protocol";
 
-const MODEL_ID = "onnx-community/depth-anything-v2-small";
+/**
+ * Two networks, selectable for comparison.
+ *
+ * V2 emits affine-invariant *inverse* depth: larger is nearer. V3 exponentiates
+ * log depth in its head, so it emits depth directly and larger is farther — the
+ * opposite convention, which has to be undone before anything downstream sees
+ * it. V3 also takes a rank-5 input, with a leading image count.
+ *
+ * V3 resolves distant structure far better: measured on a portrait with a deep
+ * background, the far third of the frame kept 179 distinct levels against V2's
+ * 10. It is not the default yet because only an 8-bit export exists, and 8-bit
+ * weights are not a fast path on WebGPU.
+ */
+const MODELS = {
+  v2: {
+    id: "onnx-community/depth-anything-v2-small",
+    rank5: false,
+    /** Inverse depth: already large-is-near. */
+    invert: false,
+  },
+  v3: {
+    id: "enes970/depth-anything-v3-small-onnx",
+    rank5: true,
+    /** Depth: large-is-far, so it must be flipped. */
+    invert: true,
+  },
+} as const;
+
+let modelKey: keyof typeof MODELS = "v2";
+const modelSpec = () => MODELS[modelKey];
 
 /** Percentile clipping bounds. Tighter than min/max, which a single specular
  *  pixel can hijack: measured dynamic-range usage 16% with min/max versus 97%
@@ -183,7 +212,7 @@ async function createSession(
   //                           182..518 at runtime and warm-up runs at 126x98
   //   graphOptimizationLevel  'all' measured within noise of the default
   // The cost is dominated by resolution, not by dispatch overhead.
-  const model = await AutoModelForDepthEstimation.from_pretrained(MODEL_ID, {
+  const model = await AutoModelForDepthEstimation.from_pretrained(modelSpec().id, {
     device: backend,
     dtype,
     progress_callback,
@@ -217,7 +246,11 @@ function toTensor(rgba: Uint8ClampedArray, width: number, height: number): Tenso
     data[2 * pixels + i] = rgba[p + 2] * bScale - bShift;
   }
 
-  return new Tensor("float32", data, [1, 3, height, width]);
+  return new Tensor(
+    "float32",
+    data,
+    modelSpec().rank5 ? [1, 1, 3, height, width] : [1, 3, height, width],
+  );
 }
 
 /** Percentile bounds via a 1024-bin histogram: ~0.36 ms for a 518x518 field. */
@@ -314,6 +347,7 @@ function normalise(data: Float32Array): Float32Array {
   const out = smoothed!;
 
   const toning = toneStrength > 0.001;
+  const inverted = modelSpec().invert;
   const a = smoothing;
   const b = 1 - a;
   const blend = !fresh && a > 0.001;
@@ -322,8 +356,11 @@ function normalise(data: Float32Array): Float32Array {
     const raw = data[i];
     let t = (raw - base) / span;
     t = t < 0 ? 0 : t > 1 ? 1 : t;
+    if (inverted) t = 1 - t;
 
-    if (toning) {
+    // Only meaningful for inverse depth: V3 already emits linear depth, and
+    // taking the logarithm again re-compresses the background it just opened up.
+    if (toning && !inverted) {
       let curved = (Math.log(raw > LOG_FLOOR ? raw : LOG_FLOOR) - logBase) / logSpan;
       curved = curved < 0 ? 0 : curved > 1 ? 1 : curved;
       t += toneStrength * (curved - t);
@@ -465,7 +502,7 @@ async function activateNext(): Promise<void> {
         type: "ready",
         backend: candidate.backend,
         dtype: candidate.dtype,
-        model: MODEL_ID,
+        model: modelSpec().id,
       });
       return;
     } catch (error) {
@@ -500,6 +537,7 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
     smoothing = message.smoothing;
     toneStrength = message.tone ?? 0;
     mobile = message.mobile;
+    modelKey = message.model ?? "v2";
     post({ type: "status", stage: "starting" });
     queue = await candidates(message.force, message.forceDtype);
     if (queue.length === 0) {

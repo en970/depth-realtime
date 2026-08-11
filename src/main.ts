@@ -846,6 +846,7 @@ async function begin(): Promise<void> {
     const params = new URLSearchParams(location.hash.replace(/^#/, ""));
     const forced = params.get("backend");
     const forcedDtype = params.get("dtype");
+    const requestedModel = params.get("model");
     const dtypes = ["fp32", "fp16", "q8", "q4f16"];
     send({
       type: "init",
@@ -858,6 +859,7 @@ async function begin(): Promise<void> {
         forcedDtype && dtypes.includes(forcedDtype)
           ? (forcedDtype as "fp32" | "fp16" | "q8" | "q4f16")
           : undefined,
+      model: requestedModel === "v3" ? "v3" : undefined,
     });
   }
   await startCamera(cameraSelect.value || undefined);
