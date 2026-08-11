@@ -10,8 +10,11 @@ sonucu gelince yüzey gölgelendirme ve büyük model kararları verilecek.
 1. "arka planı anlamıyor, arkamı siyah yapıyor" — ÇÖZÜLDÜ: uyarlanabilir ton
    eğrisi (kontrast sınırlı histogram eşitleme) eklendi, "Distance contrast"
    kaydırıcısı, varsayılan 0.70. Uzak alan detayı +%77.
-2. "FPS çok yavaş" — AÇIK. Ölçülen ~20 fps ama kullanıcının makinesinde daha
-   düşük. Derin araştırma çalışıyor (workflow wf_e8e81111-fb3).
+2. "FPS çok yavaş" — KISMEN. Ölçüldü: WebGPU'da fp16 19.4 fps, q4f16 12.4,
+   q8 0.8 — yani mevcut varsayılan (fp16) zaten en hızlısı, dtype tarafında
+   kazanç YOK. Normalizasyon tek geçişe indirildi. Kullanıcının makinesinde
+   neden yavaş olduğu HÂLÂ BİLİNMİYOR: hangi backend'e düştüğü (WebGPU mu WASM
+   mı) ve kaç fps aldığı sorulmalı; arayüzde Runtime bölümünde yazıyor.
 3. "daha kompakt" — AÇIK. İlk yükleme ~24-55 MB.
 4. "default side by side" — Reset düğmesi eklendi; varsayılan zaten split,
    kullanıcının localStorage'ında stacked kayıtlıydı.
@@ -20,7 +23,14 @@ Repo artık PUBLIC.
 
 # Sıradaki adım
 
-Görev 5: eş derinlik kontur çizgileri. Compose shader'ında, LUT aramasından
+ÖNCE ÖLÇÜM DÜZENEĞİ: quality.mjs koşular arası karşılaştırma için güvenilmez
+(aynı ayarla edgeAlignment 3.9 ile 7.5 arasında oynuyor). Tek oturumda çoklu
+varyant ölçecek şekilde yeniden yazılmalı — tıpkı görsel A/B'de yapıldığı gibi:
+sayfayı bir kez aç, kontrolü yerinde değiştir, her varyantta ölç. Bu yapılmadan
+küçük farklar değerlendirilemez.
+
+Sonra DA3-small kuantalama (aşağıdaki araştırma bulgusuna bak), sonra görev 5:
+eş derinlik kontur çizgileri. Compose shader'ında, LUT aramasından
 hemen önce; `fract(t * bandCount)` üzerinden `fwidth` ile antialiaslı ince
 çizgi. Açılıp kapanabilir olmalı (View grubunda switch).
 
@@ -81,7 +91,32 @@ sabit çıktı vermeli. Olası kaynaklar, denenme sırası:
 Bu titreme, kullanıcının "ayrıntı yok" izlenimini besliyor olabilir: kararsız
 bir alan gözde bulanık algılanır.
 
+# Araştırma bulgusu: DA3-small (2026-08-11, workflow wf_e8e81111-fb3)
+
+Ajan iki modeli de yerel onnxruntime ile aynı görüntülerde çalıştırdı:
+- Arka planın siyah olması MODELİN değil NORMALİZASYONUN suçu. Ölçüm: mevcut
+  lineer p2/p98 ile arka planda dL*=23.5 (kötü sahnede 9.7, 256 tonun 31'i).
+  Log-disparity dL*=48.1 (+%105), DA3-small dL*=50.2 (+%114). Yani DA3'ün arka
+  plan kazancının neredeyse tamamı model değiştirmeden alınabilir — ki alındı.
+- DA3-small (onnx-community/depth-anything-v3-small, Apache-2.0) hesap maliyeti
+  NÖTR: 224 px'te DA2'nin 0.88x'i (daha hızlı), 322'de 1.01x, 518'de 1.12x.
+  ETH3D δ1 86.5 -> 98.6 (uzun menzil), ama NYU 97.9 -> 97.4 (yakın menzil hafif
+  geriler). Bedava confidence haritası çıkarıyor.
+- ENGEL: depoda SADECE fp32 var (105.3 MB). Mevcut indirmeler 49.6 MB (fp16) /
+  19.1 MB (q4f16). Kuantalama yapılmadan geçiş şikayet 2 ve 3'ü kötüleştirir.
+- DA3 ÇIKTISI DERİNLİK (büyük = UZAK), DA2'nin TERSİ. Geçilirse normalise()
+  içinde ters çevirme şart, ve log/ton eğrisi DA3'te UYGULANMAMALI (ölçüldü:
+  dL* 50.2 -> 41.1, yani kötüleşiyor).
+- DA3 girdisi RANK 5: [B, num_images, 3, H, W]. toTensor() rank 4 üretiyor.
+- Kuantalama Kaggle'da GPU bile gerektirmiyor; ajan tam notebook kodu verdi
+  (onnxconverter_common float16, op_block_list=["Exp"] — DA3 kafasındaki Exp
+  fp32 kalmalı, taşma koruması). Ölçülen q8 kalite kaybı: r=0.995.
+
 # Ölçülmüş bulgular
+
+- WebGPU'da dtype hızı (ölçüldü, tek sahne): fp16 19.4 fps, q4f16 12.4 fps,
+  q8 0.8 fps. Araştırmanın "q8 2x hızlı" bulgusu CPU/WASM içindir, WebGPU'da
+  TERSİ geçerli. Varsayılan fp16 doğru.
 
 - Kalite modu ön ayarı açılışta YENİDEN UYGULANMAMALI: uyguladığında URL'den
   gelen res/guide/structure değerlerini eziyordu ve iki karşılaştırma varyantı
@@ -172,4 +207,4 @@ bak.
 
 # Son güncelleme
 
-2026-08-09
+2026-08-11
