@@ -23,7 +23,25 @@ Repo artık PUBLIC.
 
 # Sıradaki adım
 
-DA3 ŞU AN GEÇİLEMEZ — engel fp16 export'u. Durum ve kalan yol aşağıda.
+MOBİL SORUNU (kullanıcı 2026-08-11'de bildirdi): telefonda "asla derinlik namına
+bir şey yoktu, tamamen gereksiz bir noise vardı". Bu makinede TEKRARLANMIYOR:
+q4f16 ve fp16, 224 px'te makul çıktı veriyor (mobile-q4f16.png / mobile-fp16.png
+scratchpad'de). Yani sorun kullanıcının cihazına özgü.
+
+Yapılan savunma: warmup artık iki farklı sentetik kare çalıştırıp (a) sabit alan
+ve (b) girdiye tepkisizlik (korelasyon > 0.995) durumlarını yakalıyor; mobil aday
+zincirine q4f16 -> fp16 -> wasm ara basamağı eklendi.
+
+Kullanıcıdan ÖĞRENİLMESİ GEREKENLER (sormadan teşhis edilemez):
+- Telefon iOS mu Android mi, hangi sürüm?
+- Arayüzdeki Runtime bölümünde Backend ne yazıyor (WebGPU / WASM)?
+- Weights ne yazıyor (q4f16 / fp16 / q8)?
+- Kaç fps?
+Bu dördü olmadan hangi katmanın bozulduğu bilinemez. iOS 26'da ORT'nin WebGPU
+yolunda bilinen bellek/çökme sorunları var (araştırma notu); Android'de fp16
+taşması raporlanmış.
+
+# DA3 ŞU AN GEÇİLEMEZ — engel fp16 export'u. Durum ve kalan yol aşağıda.
 Bunun yerine sıradaki iş: görev 5 (eş derinlik kontur çizgileri), sonra
 görev 6 (salınımlı 3B) ve 7 (nokta bulutu).
 
@@ -75,6 +93,10 @@ otomatik salınımdan daha güçlü.
 
 - `tests/quality.mjs` yazıldı: sabit y4m girdiyle kenar hizalama, yüksek frekans
   ve zamansal kayma ölçüyor; `--save` / `--compare` ile kayıt tutuyor
+- GÖRSEL İŞLER TAMAMLANDI: eş derinlik kontur çizgileri, derinlikle çarpıtılmış
+  parallax (backward warp, delik açmıyor), ve döndürülebilir nokta bulutu
+  (kenar noktaları ayıklanıyor, boşta salınıyor). Üçü de kare hızına ölçülebilir
+  etki yapmıyor. Compose çıktısının alfa kanalı artık derinlik değerini taşıyor.
 - `--vary` eklendi: tek oturumda çoklu varyant, ileri+geri sıra ile sürüklenme
   dengelemesi. Koşular arası karşılaştırma GÜVENİLMEZ (aynı ayarla edge 3.9-7.5);
   karar verilecek her karşılaştırma `--vary` ile yapılmalı.
