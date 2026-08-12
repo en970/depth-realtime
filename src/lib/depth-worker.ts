@@ -163,8 +163,11 @@ async function candidates(
   if (forceDtype) return [{ backend: "webgpu", dtype: forceDtype }, wasm];
   if (adapter.features.has("shader-f16")) {
     // 19 MB against 50 MB. On a phone the download dominates time-to-first-frame
-    // and the quality difference is not visible at these input resolutions.
-    list.push({ backend: "webgpu", dtype: mobile ? "q4f16" : "fp16" });
+    // and the quality difference is not visible at these input resolutions — but
+    // 4-bit weights are the most likely thing to break on an untested driver, so
+    // fp16 follows as the next candidate rather than dropping straight to WASM.
+    if (mobile) list.push({ backend: "webgpu", dtype: "q4f16" });
+    list.push({ backend: "webgpu", dtype: "fp16" });
   }
   // fp16 overflow has been observed on some WebGPU drivers, and fp32 is the
   // retry — but only on desktop: the fp32 weights are 99 MB, which is not a
@@ -460,29 +463,79 @@ async function handleFrame(
 async function warmUp(candidate: Session): Promise<void> {
   const width = 126; // 9 x 14
   const height = 98; // 7 x 14
-  const rgba = new Uint8ClampedArray(width * height * 4);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = (y * width + x) * 4;
-      rgba[i] = (x / width) * 255;
-      rgba[i + 1] = (y / height) * 255;
-      rgba[i + 2] = 128;
-      rgba[i + 3] = 255;
+
+  /** Two different synthetic frames, one varying across, one down. */
+  const build = (vertical: boolean) => {
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * 4;
+        const ramp = vertical ? y / height : x / width;
+        rgba[i] = ramp * 255;
+        rgba[i + 1] = (1 - ramp) * 255;
+        rgba[i + 2] = ((x + y) % 32) * 8;
+        rgba[i + 3] = 255;
+      }
     }
-  }
+    return rgba;
+  };
 
   const budget = TIMEOUTS[candidate.backend].warmup;
-  const pixel_values = toTensor(rgba, width, height);
-  const output: any = await withTimeout(
-    candidate.model({ pixel_values }),
-    budget,
-    "warmup",
-  );
-  const tensor = output.predicted_depth ?? output.depth ?? output.logits;
-  if (!tensor) throw new Error("Model returned no depth tensor.");
-  const data = tensor.data as Float32Array;
-  if (data.length === 0 || !Number.isFinite(data[0])) {
+  const infer = async (rgba: Uint8ClampedArray) => {
+    const pixel_values = toTensor(rgba, width, height);
+    const output: any = await withTimeout(candidate.model({ pixel_values }), budget, "warmup");
+    const tensor = output.predicted_depth ?? output.depth ?? output.logits;
+    if (!tensor) throw new Error("Model returned no depth tensor.");
+    return tensor.data as Float32Array;
+  };
+
+  const first = await infer(build(false));
+  if (first.length === 0 || !Number.isFinite(first[0])) {
     throw new Error("Warm-up produced a non-finite field.");
+  }
+
+  // A finite field is not the same as a working one. Reduced-precision weights
+  // have been reported to produce plausible-looking noise on some drivers rather
+  // than failing outright, and a viewer cannot tell the difference by looking at
+  // a single frame. These two checks catch both ways that goes wrong: a field
+  // that never varies, and one that ignores its input.
+  let min = first[0];
+  let max = first[0];
+  for (let i = 1; i < first.length; i++) {
+    if (first[i] < min) min = first[i];
+    if (first[i] > max) max = first[i];
+  }
+  if (!(max - min > 1e-4)) {
+    throw new Error("Warm-up output is constant.");
+  }
+
+  const second = await infer(build(true));
+  if (second.length !== first.length) throw new Error("Warm-up output size changed.");
+
+  // Correlation between the responses to two different inputs. A working model
+  // reacts differently to a horizontal ramp than to a vertical one; weights that
+  // have collapsed produce nearly the same field whatever they are shown.
+  let sumA = 0;
+  let sumB = 0;
+  for (let i = 0; i < first.length; i++) {
+    sumA += first[i];
+    sumB += second[i];
+  }
+  const meanA = sumA / first.length;
+  const meanB = sumB / second.length;
+  let cov = 0;
+  let varA = 0;
+  let varB = 0;
+  for (let i = 0; i < first.length; i++) {
+    const da = first[i] - meanA;
+    const db = second[i] - meanB;
+    cov += da * db;
+    varA += da * da;
+    varB += db * db;
+  }
+  const correlation = cov / Math.sqrt(Math.max(varA * varB, 1e-12));
+  if (correlation > 0.995) {
+    throw new Error(`Warm-up output barely responds to input (r=${correlation.toFixed(4)}).`);
   }
 }
 
