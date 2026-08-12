@@ -197,6 +197,10 @@
 
 /* Legend ------------------------------------------------------------------ */
 
+.legend[hidden] {
+  display: none;
+}
+
 .legend {
   position: absolute;
   left: var(--space-3);

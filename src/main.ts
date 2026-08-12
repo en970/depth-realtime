@@ -61,6 +61,8 @@ const contourRange = $<HTMLInputElement>("contour-range");
 const contourValue = $<HTMLElement>("contour-value");
 const parallaxRange = $<HTMLInputElement>("parallax-range");
 const parallaxValue = $<HTMLElement>("parallax-value");
+const cloudToggle = $<HTMLInputElement>("cloud-toggle");
+const depthLegend = document.querySelector<HTMLElement>(".pane--depth .legend")!;
 const depthLabel = document.querySelector<HTMLElement>(".pane--depth .pane__label")!;
 const compareInput = $<HTMLInputElement>("compare-input");
 const infoBackend = $<HTMLElement>("info-backend");
@@ -93,6 +95,8 @@ interface Settings {
   contours: number;
   /** Parallax amplitude: warps the camera image by depth. */
   parallax: number;
+  /** Shows the field as a rotatable point cloud instead of an image. */
+  cloud: boolean;
   quality: boolean;
 }
 
@@ -113,6 +117,7 @@ const defaults: Settings = {
   tone: 0.7,
   contours: 0,
   parallax: 0,
+  cloud: false,
   quality: false,
 };
 
@@ -181,6 +186,9 @@ function readSettings(): Partial<Settings> {
   const adaptive = pick("adaptive");
   if (adaptive !== null) out.adaptive = adaptive === "1" || adaptive === "true";
 
+  const cloud = pick("cloud");
+  if (cloud !== null) out.cloud = cloud === "1" || cloud === "true";
+
   const quality = pick("quality");
   if (quality !== null) out.quality = quality === "1" || quality === "true";
 
@@ -205,6 +213,7 @@ function persistSettings(): void {
       mirror: settings.mirror ? "1" : "0",
       adaptive: settings.adaptive ? "1" : "0",
       quality: settings.quality ? "1" : "0",
+      cloud: settings.cloud ? "1" : "0",
     });
     history.replaceState(null, "", `#${params.toString()}`);
     try {
@@ -550,6 +559,7 @@ function captureFrame(): void {
 
 function present(now: number): void {
   if (!running) return;
+  driveCloud(now);
   renderer.render(now);
   requestAnimationFrame(present);
 }
@@ -708,13 +718,31 @@ function applyTone(value: number): void {
   persistSettings();
 }
 
+function applyCloud(enabled: boolean): void {
+  settings.cloud = enabled;
+  cloudToggle.checked = enabled;
+  renderer.setCloud(enabled);
+  depthLabel.textContent = enabled
+    ? "Depth / point cloud"
+    : settings.parallax > 0.001
+      ? "Depth / parallax"
+      : "Depth / relative";
+  // The colour scale describes a flat map, not a rotated cloud.
+  depthLegend.hidden = enabled;
+  persistSettings();
+}
+
 function applyParallax(value: number): void {
   settings.parallax = value;
   parallaxRange.value = String(value);
   parallaxValue.textContent = value.toFixed(2);
   setRangeFill(parallaxRange);
   renderer.setParallax(value);
-  depthLabel.textContent = value > 0.001 ? "Depth / parallax" : "Depth / relative";
+  depthLabel.textContent = settings.cloud
+    ? "Depth / point cloud"
+    : value > 0.001
+      ? "Depth / parallax"
+      : "Depth / relative";
   persistSettings();
 }
 
@@ -946,6 +974,49 @@ parallaxRange.addEventListener("input", () =>
   applyParallax(Number(parallaxRange.value)),
 );
 
+cloudToggle.addEventListener("change", () => applyCloud(cloudToggle.checked));
+
+// Drag to turn the cloud. Idle, it drifts slowly, which is what makes the
+// structure legible without anyone having to discover that it can be dragged.
+let cloudYaw = 0;
+let cloudPitch = 0.1;
+let dragging = false;
+let dragX = 0;
+let dragY = 0;
+let lastInteraction = 0;
+
+depthCanvas.addEventListener("pointerdown", (event) => {
+  if (!settings.cloud) return;
+  dragging = true;
+  dragX = event.clientX;
+  dragY = event.clientY;
+  depthCanvas.setPointerCapture(event.pointerId);
+});
+
+depthCanvas.addEventListener("pointermove", (event) => {
+  if (!dragging) return;
+  cloudYaw += (event.clientX - dragX) * 0.006;
+  cloudPitch = Math.max(-0.9, Math.min(0.9, cloudPitch + (event.clientY - dragY) * 0.004));
+  dragX = event.clientX;
+  dragY = event.clientY;
+  lastInteraction = performance.now();
+});
+
+depthCanvas.addEventListener("pointerup", (event) => {
+  dragging = false;
+  depthCanvas.releasePointerCapture(event.pointerId);
+});
+
+function driveCloud(now: number): void {
+  // Idle, the view sways rather than spinning. A continuous turn ends up facing
+  // the cloud edge-on, where a depth map has nothing to show; a slow sway keeps
+  // it near the front, which is the angle that reads as depth.
+  if (settings.cloud && !dragging && now - lastInteraction > 2500) {
+    cloudYaw = Math.sin(now / 3600) * 0.32;
+  }
+  renderer.setCloudRotation(cloudYaw, cloudPitch);
+}
+
 qualityToggle.addEventListener("change", () => applyQuality(qualityToggle.checked));
 
 // Settings persist across visits, which is right until a stored layout or a
@@ -1045,6 +1116,7 @@ applyStructure(settings.structure);
 applyTone(settings.tone);
 applyContours(settings.contours);
 applyParallax(settings.parallax);
+applyCloud(settings.cloud);
 
 // Reflect a stored quality flag without re-running the preset: the values it
 // would set are already restored, and re-applying them would overwrite anything

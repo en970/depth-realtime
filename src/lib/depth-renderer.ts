@@ -232,6 +232,114 @@ void main() {
   fragColor = vec4(rgb, clamp(t, 0.0, 1.0));
 }`;
 
+/**
+ * Point cloud view.
+ *
+ * One point per texel of the depth field, placed in space and projected. This
+ * is the only view where the depth estimate is shown as geometry rather than as
+ * a picture of geometry, which makes errors obvious in a way a colour map hides:
+ * a wall that bulges, or an object floating off its background, is visible the
+ * moment the view turns.
+ *
+ * Positions are computed in the vertex stage from gl_VertexID, so no vertex
+ * buffer is uploaded and nothing has to be re-sent when the field resizes.
+ */
+const CLOUD_VERT = `#version 300 es
+precision highp float;
+
+uniform sampler2D uField;
+uniform sampler2D uCloudCamera;
+uniform sampler2D uCloudLut;
+uniform vec2 uFieldSize;
+uniform vec2 uCoverCloud;
+uniform vec2 uRotation;    // yaw, pitch in radians
+uniform float uDepthScale;
+uniform float uAspect;
+uniform float uPointSize;
+uniform float uColourMix;  // 0 = colour scale, 1 = camera colour
+
+const float NEAR_PLANE = 1.35;
+const float FAR_PLANE = 3.1;
+const float PIVOT = 2.2;
+const float FOCAL = 1.5;
+/** Chosen so the cloud fills the pane head-on with room to turn without
+ *  clipping at the edges. */
+const float SPREAD = 0.72;
+
+out vec3 vColour;
+
+void main() {
+  int index = gl_VertexID;
+  int column = index % int(uFieldSize.x);
+  int row = index / int(uFieldSize.x);
+  vec2 uv = (vec2(float(column), float(row)) + 0.5) / uFieldSize;
+
+  float depth = texture(uField, uv).r;
+
+  // Drop points that straddle a depth discontinuity. A silhouette in a depth
+  // map is a ramp a texel or two wide, and those in-between samples have no
+  // surface to belong to: seen head-on they hide behind the edge, but as soon
+  // as the view turns they string out into a veil between foreground and
+  // background. Discarding them costs a thin outline and removes the veil.
+  vec2 texel = 1.0 / uFieldSize;
+  float dx = abs(texture(uField, uv + vec2(texel.x, 0.0)).r
+               - texture(uField, uv - vec2(texel.x, 0.0)).r);
+  float dy = abs(texture(uField, uv + vec2(0.0, texel.y)).r
+               - texture(uField, uv - vec2(0.0, texel.y)).r);
+  if (max(dx, dy) > 0.06) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);   // outside the clip volume
+    gl_PointSize = 0.0;
+    vColour = vec3(0.0);
+    return;
+  }
+
+  // Distance from a bounded range rather than 1/depth. The estimate is
+  // affine-invariant, so its absolute scale is arbitrary anyway, and taking the
+  // reciprocal literally sends the far plane to infinity: the background
+  // stretches into a long tail that dominates the view and hides the subject.
+  float distance = mix(FAR_PLANE, NEAR_PLANE, clamp(depth, 0.0, 1.0)) * uDepthScale;
+
+  // Back-projection: x and y scale with distance, which is what makes a flat
+  // wall stay flat when the view turns. The vertical extent is divided by the
+  // field's aspect, since uv is normalised on both axes and a 16:9 field would
+  // otherwise come out square.
+  vec2 centred = (uv - 0.5) * vec2(2.0, -2.0);
+  centred.y /= uFieldSize.x / uFieldSize.y;
+  vec3 position = vec3(centred * distance * SPREAD, -distance);
+
+  // Turn about the middle of the cloud, not about the camera.
+  position.z += PIVOT;
+  float cy = cos(uRotation.x), sy = sin(uRotation.x);
+  float cp = cos(uRotation.y), sp = sin(uRotation.y);
+  position.xz = mat2(cy, -sy, sy, cy) * position.xz;
+  position.yz = mat2(cp, -sp, sp, cp) * position.yz;
+  position.z -= PIVOT;
+
+  float w = max(-position.z, 0.05);
+  gl_Position = vec4(position.x * FOCAL / uAspect, position.y * FOCAL, 0.0, w);
+  // Points shrink with distance, as they would if they had physical size.
+  gl_PointSize = clamp(uPointSize / w, 1.0, 9.0);
+
+  vec2 camera = clamp((uv - 0.5) * uCoverCloud + 0.5, 0.0, 1.0);
+  vec3 fromCamera = texture(uCloudCamera, camera).rgb;
+  float lutWidth = float(textureSize(uCloudLut, 0).x);
+  vec3 fromScale = texture(uCloudLut,
+      vec2((clamp(depth, 0.0, 1.0) * (lutWidth - 1.0) + 0.5) / lutWidth, 0.5)).rgb;
+  vColour = mix(fromScale, fromCamera, uColourMix);
+}`;
+
+const CLOUD_FRAG = `#version 300 es
+precision highp float;
+in vec3 vColour;
+out vec4 fragColor;
+void main() {
+  // Round points: square ones read as a grid artefact rather than as samples.
+  vec2 offset = gl_PointCoord - 0.5;
+  if (dot(offset, offset) > 0.25) discard;
+  fragColor = vec4(vColour, 1.0);
+}`;
+
+
 interface Field {
   texture: WebGLTexture;
   width: number;
@@ -269,6 +377,12 @@ export class DepthRenderer {
   private contourBands = 16;
   private parallax = 0;
   private needsCamera = false;
+  private cloudProgram!: WebGLProgram;
+  private cloudUniforms: Record<string, WebGLUniformLocation | null> = {};
+  private cloud = false;
+  private cloudYaw = 0;
+  private cloudPitch = 0;
+  private cloudColourMix = 1;
   private mixStart = 0;
   private mixDuration = 1;
   private frames = 0;
@@ -332,6 +446,70 @@ export class DepthRenderer {
     this.currColor = this.createColorTarget();
     this.prevColor = this.createColorTarget();
     this.framebuffer = gl.createFramebuffer()!;
+
+    this.cloudProgram = link(gl, CLOUD_VERT, CLOUD_FRAG);
+    gl.useProgram(this.cloudProgram);
+    for (const name of [
+      "uField", "uCloudCamera", "uCloudLut", "uFieldSize", "uCoverCloud",
+      "uRotation", "uDepthScale", "uAspect", "uPointSize", "uColourMix",
+    ]) {
+      this.cloudUniforms[name] = gl.getUniformLocation(this.cloudProgram, name);
+    }
+    gl.uniform1i(this.cloudUniforms.uField, 1);
+    gl.uniform1i(this.cloudUniforms.uCloudLut, 2);
+    gl.uniform1i(this.cloudUniforms.uCloudCamera, 3);
+    gl.useProgram(this.displayProgram);
+  }
+
+  /**
+   * Shows the field as geometry instead of as a picture. Rotation is in
+   * radians; the caller drives it from pointer drag or from a slow idle spin.
+   */
+  setCloud(enabled: boolean, colourMix = 1): void {
+    this.cloud = enabled;
+    this.cloudColourMix = colourMix;
+    this.needsCamera = enabled || this.parallax > 0.001;
+  }
+
+  setCloudRotation(yaw: number, pitch: number): void {
+    this.cloudYaw = yaw;
+    this.cloudPitch = pitch;
+  }
+
+  private renderCloud(): void {
+    const gl = this.gl;
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.clearColor(0.027, 0.035, 0.063, 1);   // --bg-inset
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    this.uploadGuide();
+
+    gl.useProgram(this.cloudProgram);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.field.texture);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.guideTexture);
+
+    gl.uniform2f(this.cloudUniforms.uFieldSize, this.field.width, this.field.height);
+    gl.uniform2f(this.cloudUniforms.uRotation, this.cloudYaw, this.cloudPitch);
+    gl.uniform1f(this.cloudUniforms.uDepthScale, 1);
+    gl.uniform1f(this.cloudUniforms.uAspect, this.canvas.width / this.canvas.height);
+    gl.uniform1f(this.cloudUniforms.uPointSize, this.canvas.height / 90);
+    gl.uniform1f(this.cloudUniforms.uColourMix, this.cloudColourMix);
+
+    const source = this.guideSource;
+    const cameraAspect =
+      source && source.videoWidth ? source.videoWidth / source.videoHeight : 16 / 9;
+    const fieldAspect = this.field.width / this.field.height;
+    const cover: [number, number] =
+      fieldAspect > cameraAspect
+        ? [1, cameraAspect / fieldAspect]
+        : [fieldAspect / cameraAspect, 1];
+    gl.uniform2f(this.cloudUniforms.uCoverCloud, cover[0], cover[1]);
+
+    gl.drawArrays(gl.POINTS, 0, this.field.width * this.field.height);
   }
 
   private createField(): Field {
@@ -604,6 +782,12 @@ export class DepthRenderer {
     // A resize invalidates both composed frames, so rebuild them before drawing.
     if (this.canvas.clientWidth * Math.min(window.devicePixelRatio || 1, 1.5) !== this.colorWidth) {
       this.compose();
+    }
+
+    if (this.cloud) {
+      this.resize();
+      this.renderCloud();
+      return;
     }
 
     // performance.now() and the animation-frame timestamp are not the same
