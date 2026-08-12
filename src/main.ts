@@ -59,6 +59,9 @@ const toneRange = $<HTMLInputElement>("tone-range");
 const toneValue = $<HTMLElement>("tone-value");
 const contourRange = $<HTMLInputElement>("contour-range");
 const contourValue = $<HTMLElement>("contour-value");
+const parallaxRange = $<HTMLInputElement>("parallax-range");
+const parallaxValue = $<HTMLElement>("parallax-value");
+const depthLabel = document.querySelector<HTMLElement>(".pane--depth .pane__label")!;
 const compareInput = $<HTMLInputElement>("compare-input");
 const infoBackend = $<HTMLElement>("info-backend");
 const infoDtype = $<HTMLElement>("info-dtype");
@@ -88,6 +91,8 @@ interface Settings {
   tone: number;
   /** Iso-depth contour line strength. */
   contours: number;
+  /** Parallax amplitude: warps the camera image by depth. */
+  parallax: number;
   quality: boolean;
 }
 
@@ -107,6 +112,7 @@ const defaults: Settings = {
   structure: 0.6,
   tone: 0.7,
   contours: 0,
+  parallax: 0,
   quality: false,
 };
 
@@ -161,6 +167,9 @@ function readSettings(): Partial<Settings> {
   const contours = pickNumber("contours", 0, 1);
   if (contours !== null) out.contours = contours;
 
+  const parallax = pickNumber("parallax", 0, 1);
+  if (parallax !== null) out.parallax = parallax;
+
   // Advanced, URL only: how different the camera pixel has to be before a depth
   // sample stops counting. Exposed for tuning runs rather than for the panel.
   const sigma = pickNumber("sigma", 0.005, 0.5);
@@ -192,6 +201,7 @@ function persistSettings(): void {
       structure: settings.structure.toFixed(2),
       tone: settings.tone.toFixed(2),
       contours: settings.contours.toFixed(2),
+      parallax: settings.parallax.toFixed(2),
       mirror: settings.mirror ? "1" : "0",
       adaptive: settings.adaptive ? "1" : "0",
       quality: settings.quality ? "1" : "0",
@@ -698,6 +708,16 @@ function applyTone(value: number): void {
   persistSettings();
 }
 
+function applyParallax(value: number): void {
+  settings.parallax = value;
+  parallaxRange.value = String(value);
+  parallaxValue.textContent = value.toFixed(2);
+  setRangeFill(parallaxRange);
+  renderer.setParallax(value);
+  depthLabel.textContent = value > 0.001 ? "Depth / parallax" : "Depth / relative";
+  persistSettings();
+}
+
 function applyContours(value: number): void {
   settings.contours = value;
   contourRange.value = String(value);
@@ -922,6 +942,10 @@ contourRange.addEventListener("input", () =>
   applyContours(Number(contourRange.value)),
 );
 
+parallaxRange.addEventListener("input", () =>
+  applyParallax(Number(parallaxRange.value)),
+);
+
 qualityToggle.addEventListener("change", () => applyQuality(qualityToggle.checked));
 
 // Settings persist across visits, which is right until a stored layout or a
@@ -1020,6 +1044,7 @@ applyGuide(settings.guide);
 applyStructure(settings.structure);
 applyTone(settings.tone);
 applyContours(settings.contours);
+applyParallax(settings.parallax);
 
 // Reflect a stored quality flag without re-running the preset: the values it
 // would set are already restored, and re-applying them would overwrite anything

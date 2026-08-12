@@ -143,6 +143,27 @@
             </p>
           </div>
           <div class="field">
+            <label class="field__label" for="parallax-range">
+              Parallax
+              <span class="field__value" id="parallax-value">0.00</span>
+            </label>
+            <input
+              class="range"
+              id="parallax-range"
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value="0"
+            />
+            <p class="field__hint">
+              Replaces the depth map with the camera image swayed by depth: near
+              things move against far ones, which reads as three dimensions on a
+              flat screen. Occluded edges stretch rather than tearing, so the
+              cost is a soft smear at silhouettes.
+            </p>
+          </div>
+          <div class="field">
             <label class="field__label" for="contour-range">
               Depth contours
               <span class="field__value" id="contour-value">0.00</span>

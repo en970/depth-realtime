@@ -58,12 +58,38 @@ out vec4 fragColor;
 
 uniform sampler2D uPrevColor;
 uniform sampler2D uCurrColor;
+uniform sampler2D uCamera;
 uniform float uMix;
+uniform float uParallax;   // 0 = show the depth map, > 0 = warped camera
+uniform vec2 uShift;       // current view offset, in uv units
+uniform vec2 uCoverCam;    // uv scale that frames the camera like the panes do
 
 void main() {
-  vec3 previous = texture(uPrevColor, vUv).rgb;
-  vec3 current = texture(uCurrColor, vUv).rgb;
-  fragColor = vec4(mix(previous, current, uMix), 1.0);
+  vec4 previous = texture(uPrevColor, vUv);
+  vec4 current = texture(uCurrColor, vUv);
+  vec4 blended = mix(previous, current, uMix);
+
+  if (uParallax > 0.001) {
+    // Backward warp: for each output pixel, look up where it came from. Warping
+    // forwards would tear holes open behind foreground objects; going backwards
+    // there is nothing to fill, because every output pixel gets a source. The
+    // cost is that hidden surfaces stretch rather than being revealed, which
+    // reads as a soft smear at silhouettes instead of a black gap.
+    //
+    // Depth is inverse, so it is already large-is-near: subtracting the midpoint
+    // makes near objects move opposite to far ones, which is what sells the
+    // effect.
+    vec2 source = vUv + uShift * (blended.a - 0.5);
+    vec2 camera = clamp((source - 0.5) * uCoverCam + 0.5, 0.0, 1.0);
+    // This stage does not flip v (the composed frames are already the right way
+    // up), but the camera texture is uploaded unflipped and needs it.
+    camera.y = 1.0 - camera.y;
+    vec3 warped = texture(uCamera, camera).rgb;
+    fragColor = vec4(mix(blended.rgb, warped, uParallax), 1.0);
+    return;
+  }
+
+  fragColor = vec4(blended.rgb, 1.0);
 }`;
 
 const COMPOSE_FRAG = `#version 300 es
@@ -201,7 +227,9 @@ void main() {
     rgb = pow(max(linear, 0.0), vec3(1.0 / 2.2));
   }
 
-  fragColor = vec4(rgb, 1.0);
+  // Alpha carries the depth value itself. The display pass needs it to warp the
+  // camera image for parallax, and the channel is otherwise wasted.
+  fragColor = vec4(rgb, clamp(t, 0.0, 1.0));
 }`;
 
 interface Field {
@@ -239,6 +267,8 @@ export class DepthRenderer {
   private structure = 0;
   private contours = 0;
   private contourBands = 16;
+  private parallax = 0;
+  private needsCamera = false;
   private mixStart = 0;
   private mixDuration = 1;
   private frames = 0;
@@ -274,11 +304,14 @@ export class DepthRenderer {
     }
 
     gl.useProgram(this.displayProgram);
-    for (const name of ["uPrevColor", "uCurrColor", "uMix"]) {
+    for (const name of [
+      "uPrevColor", "uCurrColor", "uCamera", "uMix", "uParallax", "uShift", "uCoverCam",
+    ]) {
       this.displayUniforms[name] = gl.getUniformLocation(this.displayProgram, name);
     }
     gl.uniform1i(this.displayUniforms.uPrevColor, 5);
     gl.uniform1i(this.displayUniforms.uCurrColor, 6);
+    gl.uniform1i(this.displayUniforms.uCamera, 3);
 
     gl.useProgram(this.composeProgram);
     for (const name of [
@@ -391,6 +424,19 @@ export class DepthRenderer {
     this.recompose();
   }
 
+  /**
+   * Parallax amplitude, 0 to 1. Above zero the pane shows the camera image
+   * warped by depth rather than the depth map itself, which is the only version
+   * of this that works: shifting a colourised depth map moves a silhouette
+   * around but carries no texture for the eye to track.
+   */
+  setParallax(amount: number): void {
+    this.parallax = amount;
+    // The guide texture is only uploaded while guided upsampling is on, but
+    // parallax needs the camera too.
+    this.needsCamera = amount > 0.001;
+  }
+
   get hasFrame(): boolean {
     return this.frames > 0;
   }
@@ -445,7 +491,7 @@ export class DepthRenderer {
 
   private uploadGuide(): void {
     const source = this.guideSource;
-    if (!source || this.guideAmount <= 0.001) return;
+    if (!source || (this.guideAmount <= 0.001 && !this.needsCamera)) return;
     if (source.readyState < 2 || source.videoWidth === 0) return;
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE3);
@@ -571,6 +617,32 @@ export class DepthRenderer {
     gl.activeTexture(gl.TEXTURE6);
     gl.bindTexture(gl.TEXTURE_2D, this.currColor);
     gl.uniform1f(this.displayUniforms.uMix, mix);
+    gl.uniform1f(this.displayUniforms.uParallax, this.parallax);
+
+    if (this.parallax > 0.001) {
+      // Keep the camera upload going even between inference results: the warp is
+      // animated, so a stale frame would visibly lag the motion.
+      this.uploadGuide();
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, this.guideTexture);
+
+      // A slow sway of about one and a half percent of the width. Larger reads
+      // as a wobble rather than as depth, and stretches the occluded edges
+      // until the smear becomes the thing you notice.
+      const phase = (now / 1400) * Math.PI * 2;
+      gl.uniform2f(this.displayUniforms.uShift, Math.sin(phase) * 0.03, 0);
+
+      const source = this.guideSource;
+      const cameraAspect =
+        source && source.videoWidth ? source.videoWidth / source.videoHeight : 16 / 9;
+      const canvasAspect = this.canvas.width / this.canvas.height;
+      const cover: [number, number] =
+        canvasAspect > cameraAspect
+          ? [1, cameraAspect / canvasAspect]
+          : [canvasAspect / cameraAspect, 1];
+      gl.uniform2f(this.displayUniforms.uCoverCam, cover[0], cover[1]);
+    }
+
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 }
