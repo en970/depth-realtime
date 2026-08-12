@@ -162,11 +162,14 @@ async function candidates(
   const list: Candidate[] = [];
   if (forceDtype) return [{ backend: "webgpu", dtype: forceDtype }, wasm];
   if (adapter.features.has("shader-f16")) {
-    // 19 MB against 50 MB. On a phone the download dominates time-to-first-frame
-    // and the quality difference is not visible at these input resolutions — but
-    // 4-bit weights are the most likely thing to break on an untested driver, so
-    // fp16 follows as the next candidate rather than dropping straight to WASM.
-    if (mobile) list.push({ backend: "webgpu", dtype: "q4f16" });
+    // fp16 everywhere, including mobile.
+    //
+    // 4-bit weights were the mobile default, for a 19 MB download against 50 MB.
+    // They are not worth it. On a Galaxy S22 they produced diagonal banding with
+    // no relation to the scene — arithmetic failing quietly rather than erroring
+    // — and even where they work they are slower than fp16, not faster:
+    // measured 12.4 fps against 19.4 on the same machine, because dequantising
+    // costs more than the narrower weights save.
     list.push({ backend: "webgpu", dtype: "fp16" });
   }
   // fp16 overflow has been observed on some WebGPU drivers, and fp32 is the
@@ -494,21 +497,45 @@ async function warmUp(candidate: Session): Promise<void> {
     throw new Error("Warm-up produced a non-finite field.");
   }
 
+  // A depth field is smooth: neighbouring samples differ by a small fraction of
+  // the range, because surfaces are continuous. Arithmetic that has gone wrong
+  // on a particular driver produces something with the same range and the same
+  // responsiveness, but full of high-frequency structure — on one phone, a
+  // diagonal banding pattern with no relation to the scene.
+  //
+  // Measured on a working model: 0.003 for both synthetic ramps and a real
+  // photograph. White noise gives 0.33, diagonal banding 0.28. The threshold
+  // sits an order of magnitude above healthy and well below either failure.
+  const columns = Math.round(Math.sqrt((first.length * width) / height));
+  const rows = Math.max(1, Math.floor(first.length / Math.max(columns, 1)));
+  let range = { min: first[0], max: first[0] };
+  for (let i = 1; i < first.length; i++) {
+    if (first[i] < range.min) range.min = first[i];
+    if (first[i] > range.max) range.max = first[i];
+  }
+  const spread = range.max - range.min;
+  if (!(spread > 1e-4)) throw new Error("Warm-up output is constant.");
+
+  let variation = 0;
+  let samples = 0;
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x + 1 < columns; x++) {
+      const i = y * columns + x;
+      if (i + 1 >= first.length) break;
+      variation += Math.abs(first[i + 1] - first[i]);
+      samples++;
+    }
+  }
+  const roughness = samples > 0 ? variation / samples / spread : 0;
+  if (roughness > 0.05) {
+    throw new Error(`Warm-up output is not a depth field (roughness ${roughness.toFixed(3)}).`);
+  }
+
   // A finite field is not the same as a working one. Reduced-precision weights
   // have been reported to produce plausible-looking noise on some drivers rather
   // than failing outright, and a viewer cannot tell the difference by looking at
   // a single frame. These two checks catch both ways that goes wrong: a field
   // that never varies, and one that ignores its input.
-  let min = first[0];
-  let max = first[0];
-  for (let i = 1; i < first.length; i++) {
-    if (first[i] < min) min = first[i];
-    if (first[i] > max) max = first[i];
-  }
-  if (!(max - min > 1e-4)) {
-    throw new Error("Warm-up output is constant.");
-  }
-
   const second = await infer(build(true));
   if (second.length !== first.length) throw new Error("Warm-up output size changed.");
 
