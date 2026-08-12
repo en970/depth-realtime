@@ -23,23 +23,29 @@ Repo artık PUBLIC.
 
 # Sıradaki adım
 
-MOBİL SORUNU (kullanıcı 2026-08-11'de bildirdi): telefonda "asla derinlik namına
-bir şey yoktu, tamamen gereksiz bir noise vardı". Bu makinede TEKRARLANMIYOR:
-q4f16 ve fp16, 224 px'te makul çıktı veriyor (mobile-q4f16.png / mobile-fp16.png
-scratchpad'de). Yani sorun kullanıcının cihazına özgü.
+MOBİL SORUNU TEŞHİS EDİLDİ VE DÜZELTİLDİ (kullanıcı ekran görüntüsü verdi):
+Galaxy S22, Chrome, Backend WebGPU, Weights q4f16, 3-4 fps, çıktı 98x182.
+Derinlik paneli sahneyle ilgisiz DİYAGONAL BANT deseni gösteriyordu — hata
+vermeden, makul aralıkta, girdiye tepki vererek. Yani hem sonluluk hem
+tepkisellik kontrolünü geçen sessiz bir aritmetik bozukluğu.
 
-Yapılan savunma: warmup artık iki farklı sentetik kare çalıştırıp (a) sabit alan
-ve (b) girdiye tepkisizlik (korelasyon > 0.995) durumlarını yakalıyor; mobil aday
-zincirine q4f16 -> fp16 -> wasm ara basamağı eklendi.
+Ayırt edici: DÜZGÜNLÜK. Ölçüldü (aynı kod yoluyla):
+  sağlıklı model, sentetik rampa .... 0.0031-0.0036
+  sağlıklı model, gerçek fotoğraf ... 0.0032
+  beyaz gürültü ..................... 0.3349
+  diyagonal bant (telefondaki) ...... 0.2779
+Warmup artık 0.05 üstünü reddediyor.
 
-Kullanıcıdan ÖĞRENİLMESİ GEREKENLER (sormadan teşhis edilemez):
-- Telefon iOS mu Android mi, hangi sürüm?
-- Arayüzdeki Runtime bölümünde Backend ne yazıyor (WebGPU / WASM)?
-- Weights ne yazıyor (q4f16 / fp16 / q8)?
-- Kaç fps?
-Bu dördü olmadan hangi katmanın bozulduğu bilinemez. iOS 26'da ORT'nin WebGPU
-yolunda bilinen bellek/çökme sorunları var (araştırma notu); Android'de fp16
-taşması raporlanmış.
+q4f16 TAMAMEN KALDIRILDI. Gerekçe: (a) S22'de sessizce bozuk çıktı üretiyor,
+(b) fp16'dan YAVAŞ (12.4 vs 19.4 fps, dequantize maliyeti), (c) bozuk cihazda
+yedek de indirileceği için toplam indirme daha da büyüyor. Tek avantajı olan
+boyut, bu üçünü karşılamıyor.
+
+DOĞRULANMASI GEREKEN: kullanıcı S22'de tekrar denemeli. Beklenen: fp16 ile
+düzgün derinlik. Eğer fp16 de bozuksa warmup onu da reddedip WASM'a düşecek
+(yavaş ama doğru). Eğer fps hâlâ 3-4 ise Exynos/Xclipse GPU'da WebGPU'nun
+kendisi yavaş demektir; o zaman çözüm çözünürlüğü düşürmek, model değiştirmek
+değil.
 
 # DA3 ŞU AN GEÇİLEMEZ — engel fp16 export'u. Durum ve kalan yol aşağıda.
 Bunun yerine sıradaki iş: görev 5 (eş derinlik kontur çizgileri), sonra
