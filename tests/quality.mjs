@@ -87,6 +87,9 @@ const CONTROLS = {
   structure: "structure-range",
   guide: "guide-range",
   smooth: "smoothing-range",
+  motion: "motion-range",
+  contours: "contour-range",
+  parallax: "parallax-range",
   res: "resolution-range",
 };
 

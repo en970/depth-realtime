@@ -12,6 +12,8 @@ export interface InitMessage {
   smoothing: number;
   /** Adaptive tone curve strength, 0 to 1. */
   tone?: number;
+  /** How sharply temporal smoothing backs off where the field moves. */
+  motion?: number;
   /** Diagnostic override, set through the `backend` URL parameter. */
   force?: "webgpu" | "wasm";
   /** Diagnostic override, set through the `dtype` URL parameter. */
@@ -33,6 +35,7 @@ export interface ConfigMessage {
   resolution?: number;
   smoothing?: number;
   tone?: number;
+  motion?: number;
 }
 
 export type ToWorker = InitMessage | FrameMessage | ConfigMessage;

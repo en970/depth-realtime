@@ -291,6 +291,27 @@
             </p>
           </div>
           <div class="field">
+            <label class="field__label" for="motion-range">
+              Motion response
+              <span class="field__value" id="motion-value">0</span>
+            </label>
+            <input
+              class="range"
+              id="motion-range"
+              type="range"
+              min="0"
+              max="20"
+              step="1"
+              value="0"
+            />
+            <p class="field__hint">
+              How far smoothing backs off where the scene is moving. Off by
+              default: measured on a panning scene it added flicker rather than
+              removing trails, because a frame-to-frame difference carries as
+              much noise as motion.
+            </p>
+          </div>
+          <div class="field">
             <label class="field__label" for="guide-range">
               Edge-aware detail
               <span class="field__value" id="guide-value">0.85</span>

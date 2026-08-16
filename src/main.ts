@@ -57,6 +57,8 @@ const structureRange = $<HTMLInputElement>("structure-range");
 const structureValue = $<HTMLElement>("structure-value");
 const toneRange = $<HTMLInputElement>("tone-range");
 const toneValue = $<HTMLElement>("tone-value");
+const motionRange = $<HTMLInputElement>("motion-range");
+const motionValue = $<HTMLElement>("motion-value");
 const contourRange = $<HTMLInputElement>("contour-range");
 const contourValue = $<HTMLElement>("contour-value");
 const parallaxRange = $<HTMLInputElement>("parallax-range");
@@ -93,6 +95,8 @@ interface Settings {
   tone: number;
   /** Iso-depth contour line strength. */
   contours: number;
+  /** How sharply smoothing backs off where the scene moves. */
+  motion: number;
   /** Parallax amplitude: warps the camera image by depth. */
   parallax: number;
   /** Shows the field as a rotatable point cloud instead of an image. */
@@ -116,6 +120,7 @@ const defaults: Settings = {
   structure: 0.6,
   tone: 0.7,
   contours: 0,
+  motion: 0,
   parallax: 0,
   cloud: false,
   quality: false,
@@ -169,6 +174,9 @@ function readSettings(): Partial<Settings> {
   const tone = pickNumber("tone", 0, 1);
   if (tone !== null) out.tone = tone;
 
+  const motion = pickNumber("motion", 0, 20);
+  if (motion !== null) out.motion = motion;
+
   const contours = pickNumber("contours", 0, 1);
   if (contours !== null) out.contours = contours;
 
@@ -209,6 +217,7 @@ function persistSettings(): void {
       structure: settings.structure.toFixed(2),
       tone: settings.tone.toFixed(2),
       contours: settings.contours.toFixed(2),
+      motion: settings.motion.toFixed(1),
       parallax: settings.parallax.toFixed(2),
       mirror: settings.mirror ? "1" : "0",
       adaptive: settings.adaptive ? "1" : "0",
@@ -746,6 +755,15 @@ function applyParallax(value: number): void {
   persistSettings();
 }
 
+function applyMotion(value: number): void {
+  settings.motion = value;
+  motionRange.value = String(value);
+  motionValue.textContent = value.toFixed(0);
+  setRangeFill(motionRange);
+  send({ type: "config", motion: value });
+  persistSettings();
+}
+
 function applyContours(value: number): void {
   settings.contours = value;
   contourRange.value = String(value);
@@ -919,6 +937,7 @@ async function begin(): Promise<void> {
       resolution: settings.resolution,
       smoothing: settings.smoothing,
       tone: settings.tone,
+      motion: settings.motion,
       mobile: isMobile,
       force: forced === "wasm" || forced === "webgpu" ? forced : undefined,
       forceDtype:
@@ -965,6 +984,8 @@ structureRange.addEventListener("input", () =>
 );
 
 toneRange.addEventListener("input", () => applyTone(Number(toneRange.value)));
+
+motionRange.addEventListener("input", () => applyMotion(Number(motionRange.value)));
 
 contourRange.addEventListener("input", () =>
   applyContours(Number(contourRange.value)),
@@ -1115,6 +1136,7 @@ applyGuide(settings.guide);
 applyStructure(settings.structure);
 applyTone(settings.tone);
 applyContours(settings.contours);
+applyMotion(settings.motion);
 applyParallax(settings.parallax);
 applyCloud(settings.cloud);
 

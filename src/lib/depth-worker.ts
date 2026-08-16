@@ -72,6 +72,24 @@ const EMA_CONTRACT = 0.08;
  */
 const LOG_FLOOR = 1e-4;
 
+/**
+ * How sharply temporal smoothing backs off where the field is moving, as a
+ * multiplier on the frame-to-frame change.
+ *
+ * Off by default, on the measurements. The idea is sound — smoothing a still
+ * scene is free, smoothing a moving one drags the old position behind the new —
+ * but this way of detecting motion does not work: the frame-to-frame difference
+ * contains as much noise as motion, so a noisy pixel exempts itself from the
+ * smoothing that would have quieted it, and gets noisier. Measured on a panning
+ * scene, drift rose from 5.9 to 6.8 to 8.4 as the sensitivity went up, with no
+ * gain in edge alignment.
+ *
+ * Doing it properly needs motion estimated over a neighbourhood, where real
+ * motion is correlated between pixels and noise is not. Left as a setting so it
+ * can be measured again if that arrives.
+ */
+let motionSensitivity = 0;
+
 /** A hung WebGPU submission cannot be cancelled, but it can be raced against a
  *  timer so the app falls back instead of showing a permanently empty pane.
  *  WASM gets far longer: its first call also downloads and compiles the ONNX
@@ -355,7 +373,6 @@ function normalise(data: Float32Array): Float32Array {
   const toning = toneStrength > 0.001;
   const inverted = modelSpec().invert;
   const a = smoothing;
-  const b = 1 - a;
   const blend = !fresh && a > 0.001;
 
   for (let i = 0; i < data.length; i++) {
@@ -372,7 +389,18 @@ function normalise(data: Float32Array): Float32Array {
       t += toneStrength * (curved - t);
     }
 
-    out[i] = blend ? out[i] * a + t * b : t;
+    if (blend) {
+      const previous = out[i];
+      // Motion-adaptive rate. Smoothing a still scene removes noise for free;
+      // smoothing a moving one drags the old position along behind the new,
+      // which is a loss of detail exactly where the eye is looking. Backing the
+      // rate off in proportion to how much the pixel moved gets both.
+      const motion = previous > t ? previous - t : t - previous;
+      const rate = a * (1 - motion * motionSensitivity);
+      out[i] = rate > 0 ? previous * rate + t * (1 - rate) : t;
+    } else {
+      out[i] = t;
+    }
   }
 
   return out;
@@ -616,6 +644,7 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
     resolution = message.resolution;
     smoothing = message.smoothing;
     toneStrength = message.tone ?? 0;
+    motionSensitivity = message.motion ?? 0;
     mobile = message.mobile;
     modelKey = message.model ?? "v2";
     post({ type: "status", stage: "starting" });
@@ -635,6 +664,7 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
   if (message.type === "config") {
     if (typeof message.smoothing === "number") smoothing = message.smoothing;
     if (typeof message.tone === "number") toneStrength = message.tone;
+    if (typeof message.motion === "number") motionSensitivity = message.motion;
     if (typeof message.resolution === "number" && message.resolution !== resolution) {
       // The page decides the framing; the worker only needs to drop its
       // temporal state, whose buffers are sized to the previous field.
