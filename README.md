@@ -62,6 +62,33 @@ invert the entire visualisation. Note that Depth Anything 3 reverses this
 convention again, and the V2 metric checkpoints return metres; switching
 checkpoints therefore requires revisiting this decision.
 
+**Distance is mapped logarithmically.** The network emits inverse depth, so
+value is proportional to 1/distance: a person at half a metre and a wall at
+three metres differ by a factor of six, which puts everything past a couple of
+metres into the last few percent of the range — about fifteen levels once
+quantised, which is why the background used to read as a flat black mass. In log
+space equal ratios of distance get equal shares of the output. Measured on a
+room scene, the far third goes from ten distinct levels to seventy-nine.
+
+Contrast-limited histogram equalisation was tried first and does not work at any
+histogram resolution: equalisation cannot separate pixels that share a bin, and
+after linear scaling the entire background shares one.
+
+**Temporal accumulation follows the camera and backs off where things move.**
+Smoothing a still scene removes noise for free; smoothing a moving one drags the
+old position behind the new. Both need care to get right. The motion test needs
+a threshold at the noise floor, or a noisy pixel exempts itself from the
+smoothing that would have quieted it and gets noisier — measured, that mistake
+sent drift from 5.9 to 8.4. And the comparison has to follow the scene: hand
+held, the image travels several field texels per update, and comparing screen
+positions makes every edge look like motion. With both, on a panning scene, edge
+alignment rises 4.6 to 7.8 and drift falls 12.5 to 2.9 — sharper and steadier at
+once.
+
+The settings are scaled by the frame interval actually being achieved, because
+it varies six-fold across devices. Uncorrected, the same slider gave a 31 ms
+half-life on a laptop and 189 ms on a phone.
+
 **Percentile normalisation, not min/max.** The reference implementations
 normalise each frame between its own minimum and maximum. A single specular
 highlight then compresses the rest of the scene into a fraction of the output
@@ -144,12 +171,24 @@ the ordering for viewers with colour vision deficiency.
 | Parameters | 24.8 M |
 | Licence | Apache-2.0 |
 | Output | Affine-invariant inverse relative depth |
-| Weights | `fp16` (49.6 MB) on desktop WebGPU, `q4f16` (19.1 MB) on mobile, `q8` (27.3 MB) on WASM |
+| Weights | `fp16` (49.6 MB) on WebGPU, `q8` (27.3 MB) on WASM |
 
 Within the Depth Anything V2 family only the Small checkpoint is permissively
 licensed. Base, Large and Giant are CC-BY-NC-4.0 and cannot be used in an
 MIT-licensed project. The quality gap is modest — NYU-D δ1 of 0.973 for Small
 against 0.979 for Large — so the licence constraint costs little here.
+
+4-bit weights were once the mobile default, for a 19 MB download instead of
+50 MB. They are gone: on a Galaxy S22 they produced diagonal banding unrelated
+to the scene — arithmetic failing quietly rather than erroring — and even where
+they work they are slower than fp16 rather than faster, since dequantising costs
+more than the narrower weights save.
+
+A model is only accepted after it has produced a plausible field from two
+synthetic frames. Finite output is not enough: it must vary, must respond
+differently to different inputs, and must be smooth, since a depth field is
+continuous while broken arithmetic is not. Measured, a working model scores
+0.003 on that last test and the banding scored 0.28.
 
 Weights are fetched from the Hugging Face CDN on first use and cached by the
 browser, so subsequent visits start without a download. They are deliberately
@@ -179,6 +218,27 @@ is not premature optimisation: sustained GPU load throttles phones severely, and
 published measurements show roughly 40 % throughput loss within a minute of
 continuous inference. A fixed resolution would either waste desktop headroom or
 collapse on mobile.
+
+## Views
+
+Beyond the depth map itself, three ways of reading the same field:
+
+**Relief shading** darkens the far side of every silhouette and shades hollows
+and ridges, so surface curvature reads as shape rather than as a flat band of
+colour. Without it a face is one white patch; with it the nose, eye sockets and
+jaw line are legible.
+
+**Iso-depth contours** draw a line at every fixed step of depth, as on a
+topographic map. A smooth ramp shows that two surfaces differ but not by how
+much; lines make it countable and reveal gradients too shallow to see as colour.
+
+**Parallax** replaces the map with the camera image swayed by depth. Near things
+move against far ones, which reads as three dimensions on a flat screen. The
+warp is backward, so occluded edges stretch rather than tearing holes.
+
+**Point cloud** shows the estimate as geometry rather than as a picture of
+geometry, turned by dragging or by a slow idle sway. A wall that bulges or an
+object floating off its background is obvious here and invisible on a colour map.
 
 Three layouts are available: side by side, stacked, and a comparison slider that
 overlays the two and wipes between them. Stacked gives each pane roughly 1.8x
