@@ -90,6 +90,24 @@ const LOG_FLOOR = 1e-4;
  */
 let motionSensitivity = 0;
 
+/**
+ * Frame interval the temporal settings are calibrated against, in milliseconds.
+ *
+ * Both the smoothing rate and the motion sensitivity are defined per frame, but
+ * the interval between frames varies by a factor of six across devices: about
+ * 48 ms on the desktop this was tuned on, around 280 ms on a Galaxy S22. Left
+ * uncorrected that means two different things. A rate of 0.35 gives a 31 ms
+ * half-life here and 189 ms there — the same slider, six times the lag. And the
+ * motion term is the change between two inferences, which grows with the
+ * interval, so a sensitivity of 5 behaves like 30 on the slower device and
+ * switches the smoothing off almost everywhere.
+ *
+ * Scaling both by the observed interval makes the settings mean the same thing
+ * on any device.
+ */
+const REFERENCE_INTERVAL_MS = 48;
+let lastFrameAt = 0;
+
 /** A hung WebGPU submission cannot be cancelled, but it can be raced against a
  *  timer so the app falls back instead of showing a permanently empty pane.
  *  WASM gets far longer: its first call also downloads and compiles the ONNX
@@ -372,7 +390,21 @@ function normalise(data: Float32Array): Float32Array {
 
   const toning = toneStrength > 0.001;
   const inverted = modelSpec().invert;
-  const a = smoothing;
+
+  // Rescale the temporal settings to the interval actually being achieved, so
+  // the time constant is the same on a phone as on a laptop.
+  const timestamp = performance.now();
+  const interval = lastFrameAt
+    ? Math.min(400, Math.max(8, timestamp - lastFrameAt))
+    : REFERENCE_INTERVAL_MS;
+  lastFrameAt = timestamp;
+  const intervalRatio = interval / REFERENCE_INTERVAL_MS;
+
+  // a^ratio: two frames at half the rate leave the same weight behind as one at
+  // the full rate.
+  const a = smoothing > 0.001 ? Math.pow(smoothing, intervalRatio) : 0;
+  // The motion term grows with the interval, so the threshold has to as well.
+  const sensitivity = motionSensitivity / intervalRatio;
   const blend = !fresh && a > 0.001;
 
   for (let i = 0; i < data.length; i++) {
@@ -396,7 +428,7 @@ function normalise(data: Float32Array): Float32Array {
       // which is a loss of detail exactly where the eye is looking. Backing the
       // rate off in proportion to how much the pixel moved gets both.
       const motion = previous > t ? previous - t : t - previous;
-      const rate = a * (1 - motion * motionSensitivity);
+      const rate = a * (1 - motion * sensitivity);
       out[i] = rate > 0 ? previous * rate + t * (1 - rate) : t;
     } else {
       out[i] = t;
