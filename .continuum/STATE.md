@@ -1,51 +1,40 @@
 # Şu an
 
-Görev 1-3 ve 8'in ilk hâli bitti: ölçüm düzeneği, taban çizgisi, kamera rehberli
-kenar korumalı yükseltme ve Kalite modu (518 px + tam rehber) yayında değil ama
-yerelde çalışıyor. Kalite araştırması (workflow wf_ae9c86ae-7be) hâlâ çalışıyor;
-sonucu gelince yüzey gölgelendirme ve büyük model kararları verilecek.
+Görsel işler bitti ve yayında. Bu turun konusu ZAMANSAL davranış: kareler arası
+birikim artık kare aralığına göre ölçekleniyor, gürültü tabanına karşı kapılı ve
+kamerayı takip ediyor. Ölçülen kazanç bu projedeki en büyük tek kazanç
+(aşağıda). Ayrıca ölçüm ızgarası alanı yeterince çözebilecek boyuta çıkarıldı ve
+uyarlanabilir denetime yavaş cihazlarda gidecek yer verildi.
+
+Açık kalan tek büyük iş DA3'ün fp16 export'u.
 
 # Kullanıcının açık şikayetleri (2026-08-11)
 
-1. "arka planı anlamıyor, arkamı siyah yapıyor" — ÇÖZÜLDÜ: uyarlanabilir ton
-   eğrisi (kontrast sınırlı histogram eşitleme) eklendi, "Distance contrast"
-   kaydırıcısı, varsayılan 0.70. Uzak alan detayı +%77.
-2. "FPS çok yavaş" — KISMEN. Ölçüldü: WebGPU'da fp16 19.4 fps, q4f16 12.4,
-   q8 0.8 — yani mevcut varsayılan (fp16) zaten en hızlısı, dtype tarafında
-   kazanç YOK. Normalizasyon tek geçişe indirildi. Kullanıcının makinesinde
-   neden yavaş olduğu HÂLÂ BİLİNMİYOR: hangi backend'e düştüğü (WebGPU mu WASM
-   mı) ve kaç fps aldığı sorulmalı; arayüzde Runtime bölümünde yazıyor.
-3. "daha kompakt" — AÇIK. İlk yükleme ~24-55 MB.
-4. "default side by side" — Reset düğmesi eklendi; varsayılan zaten split,
-   kullanıcının localStorage'ında stacked kayıtlıydı.
+1. "arka planı anlamıyor, arkamı siyah yapıyor" — ÇÖZÜLDÜ. Önce uyarlanabilir
+   ton eğrisi (histogram eşitleme), sonra LOGARİTMİK uzaklık eşlemesi. Eşitleme
+   aslında işe yaramıyordu (10 -> 12 seviye); log 10 -> 79 seviye verdi.
+2. "FPS çok yavaş" — ÇÖZÜLDÜ masaüstünde (10 -> 28 fps). Mobilde bu tur
+   uyarlanabilir denetimin tabanı 182'den 154'e indirildi ve bütçe 80 -> 110 ms
+   yapıldı; S22'de 182 px 190-265 ms sürdüğü için denetim tabanda sıkışıp
+   kalıyordu. Cihazda DOĞRULANMADI.
+3. "daha kompakt" — AÇIK. İlk yükleme ~24 MB (fp16, tek dosya).
+4. "default side by side" — ÇÖZÜLDÜ.
 
-Repo artık PUBLIC.
+Repo PUBLIC.
 
 # Sıradaki adım
 
-MOBİL SORUNU TEŞHİS EDİLDİ VE DÜZELTİLDİ (kullanıcı ekran görüntüsü verdi):
-Galaxy S22, Chrome, Backend WebGPU, Weights q4f16, 3-4 fps, çıktı 98x182.
-Derinlik paneli sahneyle ilgisiz DİYAGONAL BANT deseni gösteriyordu — hata
-vermeden, makul aralıkta, girdiye tepki vererek. Yani hem sonluluk hem
-tepkisellik kontrolünü geçen sessiz bir aritmetik bozukluğu.
+DA3 fp16 export'u. Denenmemiş iki yol: `optimum.onnxruntime` ile doğrudan fp16
+export, ya da PyTorch tarafında modeli `.half()` yapıp `torch.onnx.export`.
+`onnxconverter_common` yolu kapalı (aşağıda gerekçe).
 
-Ayırt edici: DÜZGÜNLÜK. Ölçüldü (aynı kod yoluyla):
-  sağlıklı model, sentetik rampa .... 0.0031-0.0036
-  sağlıklı model, gerçek fotoğraf ... 0.0032
-  beyaz gürültü ..................... 0.3349
-  diyagonal bant (telefondaki) ...... 0.2779
-Warmup artık 0.05 üstünü reddediyor.
+Bu olmadan DA3 varsayılan olamaz: q8 export'u doğru çalışıyor (r=0.99+, 28.9 MB)
+ama tarayıcıda 0.7 fps.
 
-q4f16 TAMAMEN KALDIRILDI. Gerekçe: (a) S22'de sessizce bozuk çıktı üretiyor,
-(b) fp16'dan YAVAŞ (12.4 vs 19.4 fps, dequantize maliyeti), (c) bozuk cihazda
-yedek de indirileceği için toplam indirme daha da büyüyor. Tek avantajı olan
-boyut, bu üçünü karşılamıyor.
-
-DOĞRULANMASI GEREKEN: kullanıcı S22'de tekrar denemeli. Beklenen: fp16 ile
-düzgün derinlik. Eğer fp16 de bozuksa warmup onu da reddedip WASM'a düşecek
-(yavaş ama doğru). Eğer fps hâlâ 3-4 ise Exynos/Xclipse GPU'da WebGPU'nun
-kendisi yavaş demektir; o zaman çözüm çözünürlüğü düşürmek, model değiştirmek
-değil.
+Sonrasında: kullanıcıdan S22'de tekrar denemesini iste. Beklenen, "Reset to
+defaults" sonrası fp16 ağırlıklarla düzgün derinlik ve daha düşük çözünürlükte
+daha akıcı bir görüntü. Hâlâ 3-4 fps ise darboğaz Xclipse GPU'nun kendisidir;
+o zaman çözüm model değiştirmek değil, çözünürlüğü düşürmektir.
 
 # DA3 ŞU AN GEÇİLEMEZ — engel fp16 export'u. Durum ve kalan yol aşağıda.
 Bunun yerine sıradaki iş: görev 5 (eş derinlik kontur çizgileri), sonra
@@ -205,6 +194,21 @@ Ajan iki modeli de yerel onnxruntime ile aynı görüntülerde çalıştırdı:
 
 # Ölçülmüş bulgular
 
+- ZAMANSAL BİRİKİM (bu projedeki en büyük tek kazanç, `pan` sahnesinde eşleştirilmiş):
+  kapılama yokken motion=8 -> edge 4.60, highFreq 36.6, drift 12.54
+  gürültü tabanı eşiği + smoothstep ile -> edge 7.80, highFreq 53.6, drift 2.89
+  Eşiksiz hâli DAHA KÖTÜ idi (drift 5.9 -> 8.4): gürültülü bir piksel kendini
+  yumuşatmadan muaf tutuyor, gürültü kalıcı hâle geliyordu. Eşik olmadan
+  hareket uyarlaması bir kazanç değil, bir kayıptır.
+- KARE ARALIĞI NORMALİZASYONU: yumuşatma ve hareket eşiği artık gerçekleşen
+  aralığa göre ölçekleniyor (REFERENCE_INTERVAL_MS = 48, a = smoothing^oran).
+  Aksi hâlde aynı ayar 30 fps'lik masaüstünde ve 4 fps'lik telefonda tamamen
+  farklı davranıyordu — telefonda geçmiş kare çok eski olduğu için iz bırakıyor.
+- KAMERA TAKİBİ: birikim geçmişi artık kaydırılmış indeksten okunuyor; kaymayı
+  main.ts'teki `estimateShift()` (SAD, stride 8, yarıçap 4) 0.07 ms'de buluyor.
+- ÇÖZÜNÜRLÜK MERDİVENİNİN ALT UCU: 140 px, 182 px ile AYNI hızda koşuyor
+  (30.6 vs 30.1 fps) — o boyutta darboğaz ağ değil — ama normalizasyon
+  kararsızlaşıyor, drift 6.4 -> 26.8. Merdiven 154'te bitiyor.
 - AYAR TARAMALARI (eşleştirilmiş, tek oturum, demo20, ileri+geri ortalaması):
   tone:      0 -> edge 5.12 far 6.35 drift 8.16
              0.4 -> edge -%20, far +%70
@@ -251,6 +255,11 @@ Ajan iki modeli de yerel onnxruntime ile aynı görüntülerde çalıştırdı:
   farklar (<%10) tek koşuyla değerlendirilemez.
 
 # Ölçüm düzeneğinin sınırı (önemli)
+
+ÖNCE ÖLÇÜM IZGARASI: metrikler 320x180 ızgarada okunuyordu, yani 322 px'lik bir
+alan bile ızgaradan büyüktü. Sonuç ters yönlü: daha yüksek çözünürlüklü alanlar
+DAHA DÜŞÜK puan alıyordu. Izgara 640x360 yapıldı. Bir metrik ölçtüğü şeyden
+kaba olamaz.
 
 Chrome'un `--use-file-for-fake-video-capture` ile beslediği tek kareli y4m
 GERÇEKTEN sabit değil: yakalanan karenin parmak izi bir koşu içinde %1.3
@@ -302,6 +311,12 @@ bak.
   info" derse önce `git fetch origin`, sonra
   `--force-with-lease=main:$(git rev-parse origin/main)` kullan — filter-branch
   remote-tracking ref'i de yeniden yazdığı için lease bayatlıyor.
+- TESTLER PENCERE AÇMIYOR: `--use-angle=metal` başsız Chromium'a gerçek Metal
+  GPU'sunu veriyor. Varsayılan başsız mod SwiftShader seçiyor, ONNX Runtime da
+  onda asılıyor — HEADED=1 gerekliliği bu yüzden vardı, artık yok.
+- Ölçüm sahneleri tek komutla geri geliyor: `node tests/fixtures.mjs`.
+  Zamansal bir şey ölçülecekse sahne `pan` olmalı; donmuş kare hareket hakkında
+  hiçbir şey söylemez.
 - Ölçüm sahneleri (y4m) scratchpad'de, repoda değil:
   `.../scratchpad/refdata/{demo01,demo20,hf-depth}.y4m`. Kaybolursa
   Depth-Anything-V2 deposundaki assets/examples/*.jpg dosyalarından
@@ -312,4 +327,5 @@ bak.
 
 # Son güncelleme
 
-2026-08-11 (ölçüm düzeneği eşleştirilmiş karşılaştırmaya geçirildi)
+2026-08-17 (zamansal birikim: aralık normalizasyonu, gürültü tabanı kapısı,
+kamera takibi; ölçüm ızgarası 640x360; merdiven alt ucu 154)
