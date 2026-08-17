@@ -120,7 +120,7 @@ const defaults: Settings = {
   structure: 0.6,
   tone: 0.7,
   contours: 0,
-  motion: 0,
+  motion: 8,
   parallax: 0,
   cloud: false,
   quality: false,

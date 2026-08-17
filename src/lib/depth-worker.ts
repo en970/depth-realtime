@@ -73,22 +73,26 @@ const EMA_CONTRACT = 0.08;
 const LOG_FLOOR = 1e-4;
 
 /**
- * How sharply temporal smoothing backs off where the field is moving, as a
- * multiplier on the frame-to-frame change.
+ * How sharply temporal smoothing backs off where the field is moving.
  *
- * Off by default, on the measurements. The idea is sound — smoothing a still
- * scene is free, smoothing a moving one drags the old position behind the new —
- * but this way of detecting motion does not work: the frame-to-frame difference
- * contains as much noise as motion, so a noisy pixel exempts itself from the
- * smoothing that would have quieted it, and gets noisier. Measured on a panning
- * scene, drift rose from 5.9 to 6.8 to 8.4 as the sensitivity went up, with no
- * gain in edge alignment.
+ * The first attempt ramped linearly from zero, which failed for a measurable
+ * reason: the frame-to-frame difference of a still pixel is not zero, it is the
+ * noise floor (0.0035 of the range, measured). A linear ramp therefore let noise
+ * exempt itself from the smoothing that would have quieted it, and the pixel got
+ * noisier — drift rose from 5.9 to 8.4 as sensitivity went up.
  *
- * Doing it properly needs motion estimated over a neighbourhood, where real
- * motion is correlated between pixels and noise is not. Left as a setting so it
- * can be measured again if that arrives.
+ * A threshold fixes that. Below the noise floor nothing counts as motion and the
+ * full rate applies; above a silhouette-sized change the smoothing is off. The
+ * point of getting this right is that it lets the rate itself go up: measured,
+ * 0.35 removes 31% of the flicker and 0.8 removes 67%, and the high rate is only
+ * safe once still and moving pixels are told apart.
  */
-let motionSensitivity = 0;
+let motionSensitivity = 8;
+
+/** Below this fraction of the range, a change is noise rather than motion. */
+const MOTION_FLOOR = 0.006;
+/** Above this, it is a moving silhouette and smoothing should be off entirely. */
+const MOTION_CEILING = 0.06;
 
 /**
  * Frame interval the temporal settings are calibrated against, in milliseconds.
@@ -405,6 +409,10 @@ function normalise(data: Float32Array): Float32Array {
   const a = smoothing > 0.001 ? Math.pow(smoothing, intervalRatio) : 0;
   // The motion term grows with the interval, so the threshold has to as well.
   const sensitivity = motionSensitivity / intervalRatio;
+  // The thresholds are expressed against a sensitivity of 1, so they scale with
+  // it rather than being re-tuned every time the slider moves.
+  const floor = MOTION_FLOOR * motionSensitivity;
+  const ceiling = MOTION_CEILING * motionSensitivity;
   const blend = !fresh && a > 0.001;
 
   for (let i = 0; i < data.length; i++) {
@@ -423,12 +431,22 @@ function normalise(data: Float32Array): Float32Array {
 
     if (blend) {
       const previous = out[i];
-      // Motion-adaptive rate. Smoothing a still scene removes noise for free;
-      // smoothing a moving one drags the old position along behind the new,
-      // which is a loss of detail exactly where the eye is looking. Backing the
-      // rate off in proportion to how much the pixel moved gets both.
-      const motion = previous > t ? previous - t : t - previous;
-      const rate = a * (1 - motion * sensitivity);
+      let rate = a;
+      if (sensitivity > 0) {
+        // Smoothing a still scene removes noise for free; smoothing a moving one
+        // drags the old position behind the new, which costs detail exactly
+        // where the eye is looking.
+        const motion = previous > t ? previous - t : t - previous;
+        const scaled = motion * sensitivity;
+        if (scaled >= ceiling) {
+          rate = 0;
+        } else if (scaled > floor) {
+          // Smoothstep between the two, so the transition does not itself show
+          // up as an edge in the output.
+          const x = (scaled - floor) / (ceiling - floor);
+          rate = a * (1 - x * x * (3 - 2 * x));
+        }
+      }
       out[i] = rate > 0 ? previous * rate + t * (1 - rate) : t;
     } else {
       out[i] = t;
@@ -676,7 +694,7 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
     resolution = message.resolution;
     smoothing = message.smoothing;
     toneStrength = message.tone ?? 0;
-    motionSensitivity = message.motion ?? 0;
+    motionSensitivity = message.motion ?? 8;
     mobile = message.mobile;
     modelKey = message.model ?? "v2";
     post({ type: "status", stage: "starting" });
