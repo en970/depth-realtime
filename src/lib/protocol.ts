@@ -28,6 +28,10 @@ export interface FrameMessage {
   buffer: ArrayBuffer;
   width: number;
   height: number;
+  /** Estimated whole-pixel shift of the scene since the previous frame, in
+   *  capture pixels. Lets temporal accumulation follow a moving camera. */
+  shiftX: number;
+  shiftY: number;
 }
 
 export interface ConfigMessage {

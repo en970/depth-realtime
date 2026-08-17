@@ -167,6 +167,7 @@ let mobile = false;
 let emaLo: number | null = null;
 let emaHi: number | null = null;
 let smoothed: Float32Array | null = null;
+let history: Float32Array | null = null;
 let histogram = new Uint32Array(HIST_BINS);
 let toneStrength = 0;
 let busy = false;
@@ -370,7 +371,7 @@ let rawHi = 1;
  * Blended rather than switched, because the curve spends on distance what it
  * takes from the foreground, and which one matters depends on the scene.
  */
-function normalise(data: Float32Array): Float32Array {
+function normalise(data: Float32Array, shiftX: number, shiftY: number, fieldWidth: number): Float32Array {
   const [lo, hi] = computeBounds(data);
   rawLo = lo;
   rawHi = hi;
@@ -389,8 +390,17 @@ function normalise(data: Float32Array): Float32Array {
   const logSpan = Math.max(Math.log(Math.max(emaHi, LOG_FLOOR)) - logBase, 1e-6);
 
   const fresh = !smoothed || smoothed.length !== data.length;
-  if (fresh) smoothed = new Float32Array(data.length);
+  if (fresh) {
+    smoothed = new Float32Array(data.length);
+    history = new Float32Array(data.length);
+  }
+  // Two buffers, because the shifted read below would otherwise read values the
+  // same pass has already overwritten.
+  const previousFrame = history!;
   const out = smoothed!;
+  if (!fresh) previousFrame.set(out);
+
+  const rows = Math.max(1, Math.round(data.length / Math.max(fieldWidth, 1)));
 
   const toning = toneStrength > 0.001;
   const inverted = modelSpec().invert;
@@ -417,6 +427,8 @@ function normalise(data: Float32Array): Float32Array {
 
   for (let i = 0; i < data.length; i++) {
     const raw = data[i];
+    const column = i % fieldWidth;
+    const row = (i / fieldWidth) | 0;
     let t = (raw - base) / span;
     t = t < 0 ? 0 : t > 1 ? 1 : t;
     if (inverted) t = 1 - t;
@@ -430,7 +442,14 @@ function normalise(data: Float32Array): Float32Array {
     }
 
     if (blend) {
-      const previous = out[i];
+      // Follow the camera: compare against where this part of the scene was one
+      // frame ago, not against the same screen position. Outside the frame there
+      // is no history, so the new value stands alone.
+      const sourceColumn = column - shiftX;
+      const sourceRow = row - shiftY;
+      const inside =
+        sourceColumn >= 0 && sourceColumn < fieldWidth && sourceRow >= 0 && sourceRow < rows;
+      const previous = inside ? previousFrame[sourceRow * fieldWidth + sourceColumn] : t;
       let rate = a;
       if (sensitivity > 0) {
         // Smoothing a still scene removes noise for free; smoothing a moving one
@@ -461,6 +480,8 @@ async function handleFrame(
   buffer: ArrayBuffer,
   width: number,
   height: number,
+  shiftX: number,
+  shiftY: number,
 ): Promise<void> {
   if (!session || busy) return;
   busy = true;
@@ -488,7 +509,14 @@ async function handleFrame(
       throw new Error("NON_FINITE_OUTPUT");
     }
 
-    const normalised = normalise(raw);
+    // The shift arrives in capture pixels; the field is a different size.
+    const scale = outWidth / Math.max(width, 1);
+    const normalised = normalise(
+      raw,
+      Math.round(shiftX * scale),
+      Math.round(shiftY * scale),
+      outWidth,
+    );
 
     // Transported as 8-bit: a quarter of the bytes to copy, transfer and upload,
     // and the shader dithers by half an LSB anyway so the quantisation is not
@@ -725,6 +753,13 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
   }
 
   if (message.type === "frame") {
-    await handleFrame(message.id, message.buffer, message.width, message.height);
+    await handleFrame(
+      message.id,
+      message.buffer,
+      message.width,
+      message.height,
+      message.shiftX ?? 0,
+      message.shiftY ?? 0,
+    );
   }
 };
