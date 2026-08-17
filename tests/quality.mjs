@@ -93,9 +93,17 @@ const CONTROLS = {
   res: "resolution-range",
 };
 
-/** Sampling grid for the metrics. Independent of canvas or tensor size. */
-const GRID_W = 320;
-const GRID_H = 180;
+/**
+ * Sampling grid for the metrics.
+ *
+ * It has to out-resolve the thing being measured. At 320x180 a comparison
+ * between a 322 px field and a 518 px one showed the higher resolution scoring
+ * *lower* on fine structure, which is an artefact of the grid: everything the
+ * larger field resolved beyond the grid was averaged away before it was counted.
+ * 640x360 covers the whole ladder with room to spare.
+ */
+const GRID_W = Number(process.env.GRID_W ?? 640);
+const GRID_H = Number(process.env.GRID_H ?? 360);
 
 async function openScene(scene) {
   const y4m = join(SCENE_DIR, `${scene}.y4m`);
