@@ -156,7 +156,7 @@ function readSettings(): Partial<Settings> {
   const colormap = pick("cmap");
   if (colormap && colormap in COLORMAPS) out.colormap = colormap as ColormapId;
 
-  const resolution = pickNumber("res", 182, 518);
+  const resolution = pickNumber("res", 154, 518);
   if (resolution !== null) out.resolution = snapToPatch(resolution);
 
   const smoothing = pickNumber("smooth", 0, 0.85);
@@ -333,7 +333,16 @@ let lastAdaptation = 0;
 // 644 the output is visibly *worse* — facial structure flattens out — because
 // the input leaves the distribution the model saw. Going higher is not a
 // quality knob, it is a cliff.
-const LADDER = [182, 196, 224, 252, 280, 322, 350, 392, 434, 476, 518];
+//
+// The bottom two rungs exist for phones. A Galaxy S22 spends 190-265 ms per
+// inference at 182 px, so the controller had nowhere left to go and sat at its
+// floor delivering 3-4 fps.
+//
+// It stops at 154. Measured, 140 runs no faster than 182 — at that size
+// something other than the network is the limit — while its normalisation
+// becomes unstable enough to send drift from 6.4 to 26.8. A rung that costs
+// quality and returns no speed is not a rung.
+const LADDER = [154, 168, 182, 196, 224, 252, 280, 322, 350, 392, 434, 476, 518];
 
 /** Must match --space-4 and --space-3 in the stylesheet. */
 const GUTTER = 16;
@@ -679,7 +688,12 @@ function adapt(now: number): void {
   // Budgets are per inference. They are set below the frame interval on
   // purpose: a depth view that updates 20 times a second reads as continuous,
   // whereas 10 updates a second reads as stuttering however sharp each one is.
-  const budget = isMobile ? 80 : 45;
+  //
+  // The mobile budget was 80 ms, which a phone measured at 190-265 ms could
+  // never meet however far it dropped — so it dropped to the floor and stayed
+  // there, paying full price for a resolution that bought it nothing. 110 ms is
+  // reachable on the ladder's lower rungs and still under a tenth of a second.
+  const budget = isMobile ? 110 : 45;
 
   // Nearest rung rather than exact match: the slider steps by 14 and reaches 25
   // values, the ladder holds 11 of them. indexOf returned -1 for the rest, which
