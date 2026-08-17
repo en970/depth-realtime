@@ -24,12 +24,24 @@ Repo PUBLIC.
 
 # Sıradaki adım
 
-DA3 fp16 export'u. Denenmemiş iki yol: `optimum.onnxruntime` ile doğrudan fp16
-export, ya da PyTorch tarafında modeli `.half()` yapıp `torch.onnx.export`.
-`onnxconverter_common` yolu kapalı (aşağıda gerekçe).
+DA3 fp16 ÇÖZÜLDÜ (2026-08-17). 53 MB, HF'de `onnx/model_fp16.onnx` olarak
+duruyor, yerel ORT ile fp32'ye karşı r=1.00000 (üç sahne, en kötü hata aralığın
+%0.76'sı).
 
-Bu olmadan DA3 varsayılan olamaz: q8 export'u doğru çalışıyor (r=0.99+, 28.9 MB)
-ama tarayıcıda 0.7 fps.
+Yol: `onnxruntime.transformers.onnx_model.OnnxModel.convert_float_to_float16`,
+`keep_io_types=True`, `op_block_list=["Exp","Range","CumSum"]`. İki saniye sürdü.
+`onnxconverter_common` NEDEN başarısız olduğu da anlaşıldı: grafikteki 81 Cast
+düğümü gerçek i64 -> fp32 dönüşümü (rotary embedding indeksleri), yani ne
+katlanabiliyor ne de olduğu gibi bırakılabiliyor; o dönüştürücü bunları yeniden
+tiplemiyor. PyTorch'tan taze export yolu da kapalı — onnx-community deposunda
+PyTorch ağırlığı yok, sadece ONNX var.
+
+AÇIK KALAN: DA3 varsayılan yapılmalı mı? Tarayıcıda ölçüldü (demo20, res=322,
+tone=0): ilk koşuda v3 19.6 fps / v2 10.1 fps çıktı, ama sıra ters çevrilince
+ikisi de eşitlendi (v2 11.5 / v3 11.3, edge 2.66 / 2.69). Yani hız farkı YOK,
+ilk ölçüm ısınma etkisiydi — ve iki koşunun bu kadar benzer çıkması v3'ün
+gerçekten yüklendiğinin ayrıca doğrulanmasını gerektiriyor. Karar kalite
+kanıtıyla verilmeli, hızla değil.
 
 Sonrasında: kullanıcıdan S22'de tekrar denemesini iste. Beklenen, "Reset to
 defaults" sonrası fp16 ağırlıklarla düzgün derinlik ve daha düşük çözünürlükte

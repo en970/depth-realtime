@@ -33,8 +33,17 @@ import type {
  *
  * V3 resolves distant structure far better: measured on a portrait with a deep
  * background, the far third of the frame kept 179 distinct levels against V2's
- * 10. It is not the default yet because only an 8-bit export exists, and 8-bit
- * weights are not a fast path on WebGPU.
+ * 10. An fp16 export now exists — 53 MB, converted from the published fp32 with
+ * ONNX Runtime's converter and verified against it at r=1.00000 across three
+ * scenes, worst-case error 0.76% of range. It is still not the default: measured
+ * in the browser it runs at DA2's speed, not faster, so switching is a quality
+ * decision that has not been made on quality evidence yet.
+ *
+ * The published fp32 could not be converted with onnxconverter_common. Its 81
+ * Cast nodes are real i64 -> fp32 conversions feeding the rotary embeddings, so
+ * they can be neither folded away nor left alone: that converter does not
+ * retype them, and every downstream node then expects a type it does not get.
+ * ONNX Runtime's own converter handles them. Do not retry the other route.
  */
 const MODELS = {
   v2: {
